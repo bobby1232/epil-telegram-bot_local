@@ -8,6 +8,10 @@ from app.logic import seed_defaults_if_needed, ensure_default_services
 from app.handlers import cmd_start, cb_router, handle_contact, unified_text_router
 from app.scheduler import tick
 from app.reminders import check_and_send_reminders  # booking reminders
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 async def init_db(engine):
@@ -62,7 +66,15 @@ def main():
     async def tick_job(ctx):
         await tick(ctx.application)
 
-    app.job_queue.run_repeating(tick_job, interval=60, first=10)
+    # было (и падает):
+# app.job_queue.run_repeating(tick_job, interval=60, first=10)
+
+# стало:
+    if app.job_queue is None:
+        logger.warning('JobQueue is None. Install: python-telegram-bot[job-queue]')
+    else:
+        app.job_queue.run_repeating(tick_job, interval=60, first=10)
+
 
     # reminders: 48h and 3h before appointment (checked every 60s)
     app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=20)
