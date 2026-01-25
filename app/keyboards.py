@@ -29,7 +29,7 @@ def phone_request_kb() -> ReplyKeyboardMarkup:
 def services_kb(services: list[Service]) -> InlineKeyboardMarkup:
     rows = []
     for s in services:
-        rows.append([InlineKeyboardButton(f"{s.name} • {int(s.duration_min)} мин • €{s.price}", callback_data=f"svc:{s.id}")])
+        rows.append([InlineKeyboardButton(f"{s.name} • {int(s.duration_min)} мин • {s.price}", callback_data=f"svc:{s.id}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 
