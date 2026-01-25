@@ -231,29 +231,198 @@ async def flow_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_comment"):
         return
+
     context.user_data["awaiting_comment"] = False
     c = (update.message.text or "").strip()
     context.user_data[K_COMMENT] = None if c == "-" else c
-    await update.message.reply_text("Теперь отправь телефон кнопкой 👇", reply_markup=phone_request_kb())
+
+    # Переключаемся в ожидание телефона
     context.user_data["awaiting_phone"] = True
 
+    await update.message.reply_text(
+        "Теперь отправь телефон кнопкой 👇\n"
+        "Если кнопки нет — нажми /start и снова «Записаться».",
+        reply_markup=phone_request_kb()
+    )
+    return
+
+
+from datetime import datetime
+import pytz
+from telegram import Update
+from telegram.ext import ContextTypes
+
+# проверь, что эти импорты у тебя есть
+from app.logic import (
+    get_settings, list_active_services, create_hold_appointment,
+    upsert_user, set_user_phone,
+)
+from app.keyboards import main_menu_kb
+from app.config import Config
+from app.models import AppointmentStatus
+
+# ВАЖНО: эти ключи должны совпадать с тем, что ты пишешь в user_data в других шагах
+# Если у тебя другие названия — замени тут на свои.
+K_SERVICE_ID = "service_id"
+K_START_LOCAL = "start_local"   # должен быть datetime в timezone settings.tz
+K_COMMENT = "comment"
+
+
+def _normalize_phone(s: str) -> str:
+    s = (s or "").strip()
+    for ch in [" ", "-", "(", ")", "\u00A0"]:
+        s = s.replace(ch, "")
+    return s
+
+
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1) мы реально ждём телефон?
     if not context.user_data.get("awaiting_phone"):
         return
-    context.user_data["awaiting_phone"] = False
 
-    contact = update.message.contact
-    if not contact or not contact.phone_number:
-        await update.message.reply_text("Не вижу телефон. Нажми кнопку «Отправить телефон».")
-        context.user_data["awaiting_phone"] = True
+    msg = update.message
+    if not msg:
         return
 
-    session_factory = context.bot_data["session_factory"]
-    async with session_factory() as s:
-        async with s.begin():
-            await set_user_phone(s, update.effective_user.id, contact.phone_number)
+    # 2) достаём телефон: контакт или текстом
+    phone = None
+    if msg.contact and msg.contact.phone_number:
+        phone = msg.contact.phone_number
+    else:
+        # fallback: пользователь ввёл номер руками
+        txt = (msg.text or "").strip()
+        ok = all(ch.isdigit() or ch in "+-() " for ch in txt) and any(ch.isdigit() for ch in txt)
+        if ok:
+            phone = txt
 
-    await update.message.reply_text("Готово. Подтверди отправку заявки 👇", reply_markup=confirm_request_kb())
+    if not phone:
+        await msg.reply_text(
+            "Не вижу номер телефона. Нажми кнопку «Отправить телефон» 👇",
+        )
+        return
+
+    phone = _normalize_phone(phone)
+
+    # 3) сохраняем телефон + гарантируем user
+    cfg: Config = context.bot_data["cfg"]
+    session_factory = context.bot_data["session_factory"]
+
+    async with session_factory() as s:
+        # гарантируем пользователя (важно!)
+        await upsert_user(
+            s,
+            tg_id=update.effective_user.id,
+            username=update.effective_user.username,
+            full_name=update.effective_user.full_name,
+        )
+        await set_user_phone(s, update.effective_user.id, phone)
+
+        settings = await get_settings(s, cfg.timezone)
+
+        # 4) проверяем, что есть данные для создания заявки
+        service_id = context.user_data.get(K_SERVICE_ID)
+        start_local = context.user_data.get(K_START_LOCAL)
+        comment = context.user_data.get(K_COMMENT)
+
+        if not service_id or not start_local:
+            # не молчим — даём понятный next step
+            context.user_data["awaiting_phone"] = False
+            await s.commit()
+            await msg.reply_text(
+                "Телефон сохранён ✅\n"
+                "Но я не вижу выбранную услугу/время. Начни запись заново: /start → «Записаться».",
+                reply_markup=main_menu_kb(),
+            )
+            return
+
+        # 5) достаём service из БД
+        services = await list_active_services(s)
+        service = next((x for x in services if x.id == int(service_id)), None)
+        if not service:
+            context.user_data["awaiting_phone"] = False
+            await s.commit()
+            await msg.reply_text(
+                "Телефон сохранён ✅\n"
+                "Выбранная услуга недоступна. Начни запись заново: /start → «Записаться».",
+                reply_markup=main_menu_kb(),
+            )
+            return
+
+        # 6) создаём HOLD-заявку
+        client = (await upsert_user(
+            s,
+            tg_id=update.effective_user.id,
+            username=update.effective_user.username,
+            full_name=update.effective_user.full_name,
+        ))
+
+        try:
+            appt = await create_hold_appointment(
+                s,
+                settings=settings,
+                client=client,
+                service=service,
+                start_local=start_local,
+                comment=comment,
+            )
+            await s.commit()
+        except ValueError as e:
+            await s.rollback()
+            context.user_data["awaiting_phone"] = False
+            code = str(e)
+            if code == "SLOT_TAKEN":
+                await msg.reply_text(
+                    "Этот слот уже заняли. Пожалуйста выбери другое время: /start → «Записаться».",
+                    reply_markup=main_menu_kb(),
+                )
+            elif code == "SLOT_BLOCKED":
+                await msg.reply_text(
+                    "Это время заблокировано. Пожалуйста выбери другое: /start → «Записаться».",
+                    reply_markup=main_menu_kb(),
+                )
+            else:
+                await msg.reply_text("Не удалось создать запись. Попробуй ещё раз: /start")
+            return
+
+    # 7) флоу завершён: снимаем флаг и чистим временные поля
+    context.user_data["awaiting_phone"] = False
+
+    # можно убрать данные записи, чтобы не было “призраков”
+    # (если хочешь сохранять — не удаляй)
+    for k in [K_SERVICE_ID, K_START_LOCAL, K_COMMENT]:
+        context.user_data.pop(k, None)
+
+    # 8) уведомляем клиента
+    local_dt = appt.start_dt.astimezone(settings.tz)
+    await msg.reply_text(
+        f"Заявка отправлена ✅\n"
+        f"Услуга: {service.name}\n"
+        f"Дата/время: {local_dt.strftime('%d.%m %H:%M')}\n"
+        f"Статус: {AppointmentStatus.Hold.value}\n"
+        f"Ожидай подтверждения мастера.",
+        reply_markup=main_menu_kb(),
+    )
+
+    # 9) уведомляем админа (минимально)
+    # Если у тебя уже есть функция/шаблон “карточки заявки админа” — вызывай её тут.
+    try:
+        admin_id = int(cfg.admin_telegram_id)
+        client_name = update.effective_user.full_name or (f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id))
+        await context.bot.send_message(
+            chat_id=admin_id,
+            text=(
+                "🆕 Новая заявка (HOLD)\n"
+                f"#{appt.id}\n"
+                f"{service.name}\n"
+                f"{local_dt.strftime('%d.%m %H:%M')}\n"
+                f"Клиент: {client_name}\n"
+                f"Телефон: {phone}\n"
+                f"Комментарий: {comment or '—'}"
+            ),
+        )
+    except Exception:
+        # не валим клиентский флоу из-за админ-уведомления
+        pass
 
 async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
