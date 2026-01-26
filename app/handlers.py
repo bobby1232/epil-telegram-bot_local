@@ -320,11 +320,15 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = await get_settings(s, cfg.timezone)
 
         # 4) проверяем, что есть данные для создания заявки
-        service_id = context.user_data.get(K_SERVICE_ID)
-        start_local = context.user_data.get(K_START_LOCAL)
+        svc_id = context.user_data.get(K_SVC)
+        slot_iso = context.user_data.get(K_SLOT)
         comment = context.user_data.get(K_COMMENT)
 
-        if not service_id or not start_local:
+        start_local = None
+        if slot_iso:
+            start_local = datetime.fromisoformat(slot_iso)
+
+        if not svc_id or not start_local:
             # не молчим — даём понятный next step
             context.user_data["awaiting_phone"] = False
             await s.commit()
@@ -337,7 +341,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 5) достаём service из БД
         services = await list_active_services(s)
-        service = next((x for x in services if x.id == int(service_id)), None)
+        service = next((x for x in services if x.id == int(svc_id)), None)
         if not service:
             context.user_data["awaiting_phone"] = False
             await s.commit()
@@ -389,7 +393,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # можно убрать данные записи, чтобы не было “призраков”
     # (если хочешь сохранять — не удаляй)
-    for k in [K_SERVICE_ID, K_START_LOCAL, K_COMMENT]:
+    for k in [K_SVC, K_DATE, K_SLOT, K_COMMENT]:
         context.user_data.pop(k, None)
 
     # 8) уведомляем клиента
