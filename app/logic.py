@@ -243,16 +243,26 @@ async def create_hold_appointment(
 
 async def get_user_appointments(session: AsyncSession, tg_id: int, limit: int = 10) -> list[Appointment]:
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one()
+
+    now_utc = datetime.now(tz=pytz.UTC)
+
     return (await session.execute(
         select(Appointment)
         .options(
             selectinload(Appointment.service),
             selectinload(Appointment.client),
         )
-        .where(Appointment.client_user_id == u.id)
+        .where(
+            and_(
+                Appointment.client_user_id == u.id,
+                Appointment.start_dt >= now_utc,  # ✅ только будущие
+                Appointment.status.in_([AppointmentStatus.Booked, AppointmentStatus.Hold]),  # ✅ только актуальные статусы
+            )
+        )
         .order_by(Appointment.start_dt.asc())
         .limit(limit)
     )).scalars().all()
+
 
 async def get_appointment(session: AsyncSession, appt_id: int) -> Appointment:
     return (await session.execute(
