@@ -69,15 +69,13 @@ def main():
     # было (и падает):
 # app.job_queue.run_repeating(tick_job, interval=60, first=10)
 
-# стало:
+    # стало:
     if app.job_queue is None:
         logger.warning('JobQueue is None. Install: python-telegram-bot[job-queue]')
     else:
         app.job_queue.run_repeating(tick_job, interval=60, first=10)
-
-
-    # reminders: 48h and 3h before appointment (checked every 60s)
-    app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=20)
+        # reminders: booking reminders (checked every 60s)
+        app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=20)
 
     # LOCAL: polling if webhook not configured
     if cfg.webhook_url:

@@ -320,15 +320,11 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = await get_settings(s, cfg.timezone)
 
         # 4) проверяем, что есть данные для создания заявки
-        svc_id = context.user_data.get(K_SVC)
-        slot_iso = context.user_data.get(K_SLOT)
+        service_id = context.user_data.get(K_SERVICE_ID)
+        start_local = context.user_data.get(K_START_LOCAL)
         comment = context.user_data.get(K_COMMENT)
 
-        start_local = None
-        if slot_iso:
-            start_local = datetime.fromisoformat(slot_iso)
-
-        if not svc_id or not start_local:
+        if not service_id or not start_local:
             # не молчим — даём понятный next step
             context.user_data["awaiting_phone"] = False
             await s.commit()
@@ -341,7 +337,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 5) достаём service из БД
         services = await list_active_services(s)
-        service = next((x for x in services if x.id == int(svc_id)), None)
+        service = next((x for x in services if x.id == int(service_id)), None)
         if not service:
             context.user_data["awaiting_phone"] = False
             await s.commit()
@@ -415,18 +411,12 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=admin_id,
             text=(
-                "🆕 Новая заявка (HOLD)
-"
-                f"#{appt.id}
-"
-                f"{service.name}
-"
-                f"{local_dt.strftime('%d.%m %H:%M')}
-"
-                f"Клиент: {client_name}
-"
-                f"Телефон: {phone}
-"
+                f"🆕 Новая заявка (HOLD)\n"
+                f"#{appt.id}\n"
+                f"{service.name}\n"
+                f"{local_dt.strftime('%d.%m %H:%M')}\n"
+                f"Клиент: {client_name}\n"
+                f"Телефон: {phone}\n"
                 f"Комментарий: {comment or '—'}"
             ),
             reply_markup=admin_request_kb(appt.id),
