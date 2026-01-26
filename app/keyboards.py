@@ -1,13 +1,14 @@
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date, datetime, tzinfo
+from typing import Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from app.models import Service, Appointment
-from typing import Optional
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
     kb = [
         ["Записаться", "Цены и услуги"],
         ["Адрес / Контакты", "Мои записи"],
+        ["История"],
         ["Задать вопрос"],
     ]
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
@@ -67,25 +68,10 @@ def admin_request_kb(appt_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Написать клиенту", callback_data=f"adm:msg:{appt_id}")],
     ])
 
-def my_appts_kb(appts: list[Appointment], tz: Optional[tzinfo] = None, show_holds: bool = False) -> InlineKeyboardMarkup:
-    """Список записей клиента.
-
-    Важно: tz нужно передавать явно (например, settings.tz), иначе время уйдет в TZ сервера (часто UTC).
-    show_holds по умолчанию False, чтобы не путать клиента незавершёнными HOLD-заявками.
-    """
+def my_appts_kb(appts: list[Appointment], tz: Optional[tzinfo] = None) -> InlineKeyboardMarkup:
+    """Upcoming appointments list (client)."""
     rows = []
-    now = datetime.now(tz) if tz else None
-
     for a in appts:
-        # Фильтрация HOLD
-        if a.status.value.lower() == "hold":
-            if not show_holds:
-                continue
-            if now and getattr(a, "hold_expires_at", None):
-                exp = a.hold_expires_at.astimezone(tz) if tz else a.hold_expires_at
-                if exp <= now:
-                    continue
-
         dt = a.start_dt.astimezone(tz) if tz else a.start_dt.astimezone()
         rows.append([
             InlineKeyboardButton(
@@ -93,7 +79,20 @@ def my_appts_kb(appts: list[Appointment], tz: Optional[tzinfo] = None, show_hold
                 callback_data=f"my:{a.id}"
             )
         ])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
+    return InlineKeyboardMarkup(rows)
 
+def my_history_kb(appts: list[Appointment], tz: Optional[tzinfo] = None) -> InlineKeyboardMarkup:
+    """Past appointments list (client history)."""
+    rows = []
+    for a in appts:
+        dt = a.start_dt.astimezone(tz) if tz else a.start_dt.astimezone()
+        rows.append([
+            InlineKeyboardButton(
+                f"#{a.id} • {dt.strftime('%d.%m %H:%M')} • {a.status.value}",
+                callback_data=f"my:{a.id}"
+            )
+        ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 

@@ -4,19 +4,20 @@ import pytz
 
 from telegram import Update
 from telegram.ext import ContextTypes
+from app.keyboards import admin_menu_kb
 
 
 from app.config import Config
 from app.logic import (
     get_settings, upsert_user, set_user_phone, list_active_services, list_available_dates,
-    list_available_slots_for_service, create_hold_appointment, get_user_appointments,
+    list_available_slots_for_service, create_hold_appointment, get_user_appointments, get_user_appointments_history,
     get_appointment, admin_confirm, admin_reject, cancel_by_client
 ,
     admin_list_appointments_for_day, admin_list_holds
 )
 from app.keyboards import (
     main_menu_kb, phone_request_kb, services_kb, dates_kb, slots_kb, confirm_request_kb,
-    admin_request_kb, my_appts_kb, my_appt_actions_kb, reminder_kb
+    admin_request_kb, my_appts_kb, my_history_kb, my_appt_actions_kb, reminder_kb
 ,
     admin_menu_kb
 )
@@ -28,10 +29,7 @@ K_SLOT = "slot_iso"
 K_COMMENT = "comment"
 
 def is_admin(cfg: Config, user_id: int) -> bool:
-    try:
-        return int(user_id) == int(cfg.admin_telegram_id)
-    except Exception:
-        return False
+    return user_id == cfg.admin_telegram_id
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
@@ -63,6 +61,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_contacts(update, context)
     if txt == "Мои записи":
         return await show_my_appointments(update, context)
+    if txt == "История":
+        return await show_my_history(update, context)
     if txt == "Задать вопрос":
         return await ask_question(update, context)
 
@@ -249,11 +249,33 @@ async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return
 
 
+from datetime import datetime
+import pytz
+from telegram import Update
+from telegram.ext import ContextTypes
+
+# проверь, что эти импорты у тебя есть
+from app.logic import (
+    get_settings, list_active_services, create_hold_appointment,
+    upsert_user, set_user_phone,
+)
+from app.keyboards import main_menu_kb
+from app.config import Config
+from app.models import AppointmentStatus
+
+# ВАЖНО: эти ключи должны совпадать с тем, что ты пишешь в user_data в других шагах
+# Если у тебя другие названия — замени тут на свои.
+K_SERVICE_ID = "service_id"
+K_START_LOCAL = "start_local"   # должен быть datetime в timezone settings.tz
+K_COMMENT = "comment"
+
+
 def _normalize_phone(s: str) -> str:
     s = (s or "").strip()
     for ch in [" ", "-", "(", ")", "\u00A0"]:
         s = s.replace(ch, "")
     return s
+
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1) мы реально ждём телефон?
@@ -269,45 +291,26 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.contact and msg.contact.phone_number:
         phone = msg.contact.phone_number
     else:
+        # fallback: пользователь ввёл номер руками
         txt = (msg.text or "").strip()
         ok = all(ch.isdigit() or ch in "+-() " for ch in txt) and any(ch.isdigit() for ch in txt)
         if ok:
             phone = txt
 
     if not phone:
-        await msg.reply_text("Не вижу номер телефона. Нажми кнопку «Отправить телефон» 👇")
+        await msg.reply_text(
+            "Не вижу номер телефона. Нажми кнопку «Отправить телефон» 👇",
+        )
         return
 
     phone = _normalize_phone(phone)
 
+    # 3) сохраняем телефон + гарантируем user
     cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
 
-    # берём данные сессии записи (единые ключи по всему проекту)
-    svc_id = context.user_data.get(K_SVC)
-    slot_iso = context.user_data.get(K_SLOT)
-    comment = context.user_data.get(K_COMMENT)
-
-    start_local = None
-    if slot_iso:
-        try:
-            start_local = datetime.fromisoformat(slot_iso)
-        except Exception:
-            start_local = None
-
-    if not svc_id or not start_local:
-        context.user_data["awaiting_phone"] = False
-        await msg.reply_text(
-            "Телефон сохранён ✅\n"
-            "Но я не вижу выбранную услугу/время. Начни запись заново: /start → «Записаться».",
-            reply_markup=main_menu_kb(),
-        )
-        for k in (K_SVC, K_DATE, K_SLOT, K_COMMENT):
-            context.user_data.pop(k, None)
-        return
-
-    # транзакция в БД
     async with session_factory() as s:
+        # гарантируем пользователя (важно!)
         await upsert_user(
             s,
             tg_id=update.effective_user.id,
@@ -318,26 +321,42 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         settings = await get_settings(s, cfg.timezone)
 
-        services = await list_active_services(s)
-        service = next((x for x in services if x.id == int(svc_id)), None)
-        if not service:
-            await s.commit()
+        # 4) проверяем, что есть данные для создания заявки
+        service_id = context.user_data.get(K_SERVICE_ID)
+        start_local = context.user_data.get(K_START_LOCAL)
+        comment = context.user_data.get(K_COMMENT)
+
+        if not service_id or not start_local:
+            # не молчим — даём понятный next step
             context.user_data["awaiting_phone"] = False
+            await s.commit()
+            await msg.reply_text(
+                "Телефон сохранён ✅\n"
+                "Но я не вижу выбранную услугу/время. Начни запись заново: /start → «Записаться».",
+                reply_markup=main_menu_kb(),
+            )
+            return
+
+        # 5) достаём service из БД
+        services = await list_active_services(s)
+        service = next((x for x in services if x.id == int(service_id)), None)
+        if not service:
+            context.user_data["awaiting_phone"] = False
+            await s.commit()
             await msg.reply_text(
                 "Телефон сохранён ✅\n"
                 "Выбранная услуга недоступна. Начни запись заново: /start → «Записаться».",
                 reply_markup=main_menu_kb(),
             )
-            for k in (K_SVC, K_DATE, K_SLOT, K_COMMENT):
-                context.user_data.pop(k, None)
             return
 
-        client = await upsert_user(
+        # 6) создаём HOLD-заявку
+        client = (await upsert_user(
             s,
             tg_id=update.effective_user.id,
             username=update.effective_user.username,
             full_name=update.effective_user.full_name,
-        )
+        ))
 
         try:
             appt = await create_hold_appointment(
@@ -364,55 +383,48 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=main_menu_kb(),
                 )
             else:
-                await msg.reply_text("Не удалось создать запись. Попробуй ещё раз: /start", reply_markup=main_menu_kb())
+                await msg.reply_text("Не удалось создать запись. Попробуй ещё раз: /start")
             return
 
-        # сохраняем всё нужное до выхода из сессии
-        appt_id = appt.id
-        start_dt = appt.start_dt
-        hold_status = appt.status.value if appt.status else AppointmentStatus.Hold.value
-        tz = settings.tz
-        service_name = service.name
-
-    # флоу завершён: снимаем флаг и чистим временные поля
+    # 7) флоу завершён: снимаем флаг и чистим временные поля
     context.user_data["awaiting_phone"] = False
-    for k in (K_SVC, K_DATE, K_SLOT, K_COMMENT):
+
+    # можно убрать данные записи, чтобы не было “призраков”
+    # (если хочешь сохранять — не удаляй)
+    for k in [K_SERVICE_ID, K_START_LOCAL, K_COMMENT]:
         context.user_data.pop(k, None)
 
-    # уведомляем клиента
-    local_dt = start_dt.astimezone(tz)
+    # 8) уведомляем клиента
+    local_dt = appt.start_dt.astimezone(settings.tz)
     await msg.reply_text(
-        "Заявка отправлена ✅\n"
-        f"Услуга: {service_name}\n"
+        f"Заявка отправлена ✅\n"
+        f"Услуга: {service.name}\n"
         f"Дата/время: {local_dt.strftime('%d.%m %H:%M')}\n"
-        f"Статус: {hold_status}\n"
-        "Ожидай подтверждения мастера.",
+        f"Статус: {AppointmentStatus.Hold.value}\n"
+        f"Ожидай подтверждения мастера.",
         reply_markup=main_menu_kb(),
     )
 
-    # уведомляем админа (с кнопками)
+    # 9) уведомляем админа (минимально)
+    # Если у тебя уже есть функция/шаблон “карточки заявки админа” — вызывай её тут.
     try:
         admin_id = int(cfg.admin_telegram_id)
-        client_name = (
-            update.effective_user.full_name
-            or (f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id))
-        )
+        client_name = update.effective_user.full_name or (f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id))
         await context.bot.send_message(
             chat_id=admin_id,
             text=(
                 "🆕 Новая заявка (HOLD)\n"
-                f"#{appt_id}\n"
-                f"{service_name}\n"
+                f"#{appt.id}\n"
+                f"{service.name}\n"
                 f"{local_dt.strftime('%d.%m %H:%M')}\n"
                 f"Клиент: {client_name}\n"
                 f"Телефон: {phone}\n"
                 f"Комментарий: {comment or '—'}"
             ),
-            reply_markup=admin_request_kb(appt_id),
         )
-    except Exception as e:
-        print("ADMIN NOTIFY ERROR:", e)
-
+    except Exception:
+        # не валим клиентский флоу из-за админ-уведомления
+        pass
 
 async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
@@ -467,21 +479,43 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_my_appointments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
     async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
         appts = await get_user_appointments(s, update.effective_user.id, limit=10)
+
     if not appts:
-        await update.message.reply_text("У вас пока нет записей.", reply_markup=main_menu_kb())
+        await update.message.reply_text("Предстоящих записей нет.", reply_markup=main_menu_kb())
         return
-    await update.message.reply_text("Ваши записи:", reply_markup=my_appts_kb(appts))
+
+    await update.message.reply_text("Ваши предстоящие записи:", reply_markup=my_appts_kb(appts, tz=settings.tz))
 
 async def show_my_appointments_from_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
     async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
         appts = await get_user_appointments(s, update.effective_user.id, limit=10)
+
     if not appts:
-        return await update.callback_query.message.edit_text("У вас пока нет записей.")
-    await update.callback_query.message.edit_text("Ваши записи:", reply_markup=my_appts_kb(appts))
+        return await update.callback_query.message.edit_text("Предстоящих записей нет.")
+    await update.callback_query.message.edit_text("Ваши предстоящие записи:", reply_markup=my_appts_kb(appts, tz=settings.tz))
+
+
+
+async def show_my_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        appts = await get_user_appointments_history(s, update.effective_user.id, limit=20)
+
+    if not appts:
+        await update.message.reply_text("История записей пока пуста.", reply_markup=main_menu_kb())
+        return
+
+    await update.message.reply_text("История записей:", reply_markup=my_history_kb(appts, tz=settings.tz))
 
 async def show_my_appointment_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
     cfg: Config = context.bot_data["cfg"]
