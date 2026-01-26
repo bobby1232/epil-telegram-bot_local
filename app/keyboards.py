@@ -3,6 +3,17 @@ from datetime import date, datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from app.models import Service, Appointment
 
+STATUS_RU = {
+    "Hold": "Ожидает подтверждения",
+    "Booked": "Подтверждена",
+    "Rejected": "Отклонена",
+    "Canceled": "Отменена",
+    "Completed": "Завершена",
+}
+
+def status_ru(v: str) -> str:
+    return STATUS_RU.get(v, v)
+
 def main_menu_kb() -> ReplyKeyboardMarkup:
     kb = [
         ["Записаться", "Цены и услуги"],
@@ -67,10 +78,16 @@ def admin_request_kb(appt_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Написать клиенту", callback_data=f"adm:msg:{appt_id}")],
     ])
 
-def my_appts_kb(appts: list[Appointment]) -> InlineKeyboardMarkup:
+def my_appts_kb(appts: list[Appointment], tz=None) -> InlineKeyboardMarkup:
     rows = []
     for a in appts:
-        rows.append([InlineKeyboardButton(f"#{a.id} • {a.start_dt.astimezone().strftime('%d.%m %H:%M')} • {a.status.value}", callback_data=f"my:{a.id}")])
+        dt = a.start_dt.astimezone(tz) if tz else a.start_dt.astimezone()
+        rows.append([
+            InlineKeyboardButton(
+                f"#{a.id} • {dt.strftime('%d.%m %H:%M')} • {status_ru(a.status.value)}",
+                callback_data=f"my:{a.id}",
+            )
+        ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 
