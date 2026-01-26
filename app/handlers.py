@@ -21,7 +21,6 @@ from app.keyboards import (
     admin_request_kb, my_appts_kb, my_appt_actions_kb, reminder_kb
 ,
     admin_menu_kb
-, status_ru
 )
 from app.models import AppointmentStatus
 
@@ -280,6 +279,13 @@ def _normalize_phone(s: str) -> str:
 
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Получает телефон (через contact или текстом), сохраняет его и создаёт HOLD-заявку.
+
+    Критично: берём выбранную услугу/слот из тех же ключей user_data, которые заполняются
+    на шагах выбора услуги/даты/времени: K_SVC ("svc_id") и K_SLOT ("slot_iso").
+    Для обратной совместимости допускаем старые ключи (K_SERVICE_ID / K_START_LOCAL), если они вдруг есть.
+    """
     # 1) мы реально ждём телефон?
     if not context.user_data.get("awaiting_phone"):
         return
@@ -300,16 +306,28 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone = txt
 
     if not phone:
-        await msg.reply_text(
-            "Не вижу номер телефона. Нажми кнопку «Отправить телефон» 👇",
-        )
+        await msg.reply_text("Не вижу номер телефона. Нажми кнопку «Отправить телефон» 👇")
         return
 
     phone = _normalize_phone(phone)
 
-    # 3) сохраняем телефон + гарантируем user
     cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
+
+    # 3) читаем выбранные данные записи (сначала новые ключи, потом fallback на старые)
+    svc_id = context.user_data.get(K_SVC) or context.user_data.get("service_id") or context.user_data.get("svc_id")
+    slot_iso = context.user_data.get(K_SLOT) or context.user_data.get("start_local") or context.user_data.get("slot_iso")
+    comment = context.user_data.get(K_COMMENT)
+
+    start_local = None
+    if slot_iso:
+        if isinstance(slot_iso, datetime):
+            start_local = slot_iso
+        else:
+            try:
+                start_local = datetime.fromisoformat(str(slot_iso))
+            except Exception:
+                start_local = None
 
     async with session_factory() as s:
         # гарантируем пользователя (важно!)
@@ -324,16 +342,12 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = await get_settings(s, cfg.timezone)
 
         # 4) проверяем, что есть данные для создания заявки
-        service_id = context.user_data.get(K_SERVICE_ID)
-        start_local = context.user_data.get(K_START_LOCAL)
-        comment = context.user_data.get(K_COMMENT)
-
-        if not service_id or not start_local:
-            # не молчим — даём понятный next step
+        if not svc_id or not start_local:
             context.user_data["awaiting_phone"] = False
             await s.commit()
             await msg.reply_text(
-                "Телефон сохранён ✅\n"
+                "Телефон сохранён ✅
+"
                 "Но я не вижу выбранную услугу/время. Начни запись заново: /start → «Записаться».",
                 reply_markup=main_menu_kb(),
             )
@@ -341,24 +355,25 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 5) достаём service из БД
         services = await list_active_services(s)
-        service = next((x for x in services if x.id == int(service_id)), None)
+        service = next((x for x in services if x.id == int(svc_id)), None)
         if not service:
             context.user_data["awaiting_phone"] = False
             await s.commit()
             await msg.reply_text(
-                "Телефон сохранён ✅\n"
+                "Телефон сохранён ✅
+"
                 "Выбранная услуга недоступна. Начни запись заново: /start → «Записаться».",
                 reply_markup=main_menu_kb(),
             )
             return
 
         # 6) создаём HOLD-заявку
-        client = (await upsert_user(
+        client = await upsert_user(
             s,
             tg_id=update.effective_user.id,
             username=update.effective_user.username,
             full_name=update.effective_user.full_name,
-        ))
+        )
 
         try:
             appt = await create_hold_appointment(
@@ -385,48 +400,58 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=main_menu_kb(),
                 )
             else:
-                await msg.reply_text("Не удалось создать запись. Попробуй ещё раз: /start")
+                await msg.reply_text("Не удалось создать запись. Попробуй ещё раз: /start", reply_markup=main_menu_kb())
             return
 
     # 7) флоу завершён: снимаем флаг и чистим временные поля
     context.user_data["awaiting_phone"] = False
-
-    # можно убрать данные записи, чтобы не было “призраков”
-    # (если хочешь сохранять — не удаляй)
-    for k in [K_SERVICE_ID, K_START_LOCAL, K_COMMENT]:
+    for k in [K_SVC, K_DATE, K_SLOT, K_COMMENT, "service_id", "start_local", "svc_id", "slot_iso"]:
         context.user_data.pop(k, None)
 
     # 8) уведомляем клиента
     local_dt = appt.start_dt.astimezone(settings.tz)
     await msg.reply_text(
-        f"Заявка отправлена ✅\n"
-        f"Услуга: {service.name}\n"
-        f"Дата/время: {local_dt.strftime('%d.%m %H:%M')}\n"
-        f"Статус: {status_ru(AppointmentStatus.Hold.value)}\n"
+        f"Заявка отправлена ✅
+"
+        f"Услуга: {service.name}
+"
+        f"Дата/время: {local_dt.strftime('%d.%m %H:%M')}
+"
+        f"Статус: {AppointmentStatus.Hold.value}
+"
         f"Ожидай подтверждения мастера.",
         reply_markup=main_menu_kb(),
     )
 
-    # 9) уведомляем админа (минимально)
-    # Если у тебя уже есть функция/шаблон “карточки заявки админа” — вызывай её тут.
+    # 9) уведомляем админа с кнопками
     try:
         admin_id = int(cfg.admin_telegram_id)
-        client_name = update.effective_user.full_name or (f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id))
+        client_name = (
+            update.effective_user.full_name
+            or (f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id))
+        )
         await context.bot.send_message(
             chat_id=admin_id,
             text=(
-                "🆕 Новая заявка (HOLD)\n"
-                f"#{appt.id}\n"
-                f"{service.name}\n"
-                f"{local_dt.strftime('%d.%m %H:%M')}\n"
-                f"Клиент: {client_name}\n"
-                f"Телефон: {phone}\n"
+                "🆕 Новая заявка (HOLD)
+"
+                f"#{appt.id}
+"
+                f"{service.name}
+"
+                f"{local_dt.strftime('%d.%m %H:%M')}
+"
+                f"Клиент: {client_name}
+"
+                f"Телефон: {phone}
+"
                 f"Комментарий: {comment or '—'}"
             ),
+            reply_markup=admin_request_kb(appt.id),
         )
     except Exception:
-        # не валим клиентский флоу из-за админ-уведомления
         pass
+
 
 async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
@@ -481,25 +506,22 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_my_appointments(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
     async with session_factory() as s:
-        settings = await get_settings(s, cfg.timezone)
         appts = await get_user_appointments(s, update.effective_user.id, limit=10)
     if not appts:
         await update.message.reply_text("У вас пока нет записей.", reply_markup=main_menu_kb())
         return
-    await update.message.reply_text("Ваши записи:", reply_markup=my_appts_kb(appts, tz=settings.tz))
+    await update.message.reply_text("Ваши записи:", reply_markup=my_appts_kb(appts))
 
 async def show_my_appointments_from_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
     async with session_factory() as s:
-        settings = await get_settings(s, cfg.timezone)
         appts = await get_user_appointments(s, update.effective_user.id, limit=10)
     if not appts:
         return await update.callback_query.message.edit_text("У вас пока нет записей.")
-    await update.callback_query.message.edit_text("Ваши записи:", reply_markup=my_appts_kb(appts, tz=settings.tz))
+    await update.callback_query.message.edit_text("Ваши записи:", reply_markup=my_appts_kb(appts))
+
 
 async def show_my_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
@@ -510,7 +532,7 @@ async def show_my_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not appts:
         await update.message.reply_text("История пустая.", reply_markup=main_menu_kb())
         return
-    await update.message.reply_text("История:", reply_markup=my_appts_kb(appts, tz=settings.tz))
+    await update.message.reply_text("История:", reply_markup=my_appts_kb(appts))
 
 async def show_my_history_from_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
@@ -520,7 +542,7 @@ async def show_my_history_from_cb(update: Update, context: ContextTypes.DEFAULT_
         appts = await get_user_appointments_history(s, update.effective_user.id, limit=10)
     if not appts:
         return await update.callback_query.message.edit_text("История пустая.")
-    await update.callback_query.message.edit_text("История:", reply_markup=my_appts_kb(appts, tz=settings.tz))
+    await update.callback_query.message.edit_text("История:", reply_markup=my_appts_kb(appts))
 
 async def show_my_appointment_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
     cfg: Config = context.bot_data["cfg"]
@@ -531,7 +553,7 @@ async def show_my_appointment_detail(update: Update, context: ContextTypes.DEFAU
 
     txt = (
         f"Запись #{appt.id}\n"
-        f"Статус: {status_ru(appt.status.value)}\n"
+        f"Статус: {appt.status.value}\n"
         f"Дата/время: {appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')}\n"
         f"Услуга: {appt.service.name}\n"
         f"Комментарий: {appt.client_comment or '—'}"
@@ -647,7 +669,7 @@ async def admin_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE, off
         t = a.start_dt.astimezone(settings.tz).strftime("%H:%M")
         client = a.client.full_name or (f"@{a.client.username}" if a.client.username else str(a.client.tg_id))
         phone = a.client.phone or "—"
-        lines.append(f"• {t} | #{a.id} | {status_ru(a.status.value)} | {a.service.name} | {client} | {phone}")
+        lines.append(f"• {t} | #{a.id} | {a.status.value} | {a.service.name} | {client} | {phone}")
 
     await update.message.reply_text("\n".join(lines), reply_markup=admin_menu_kb())
 
