@@ -9,6 +9,12 @@ from sqlalchemy.orm import selectinload
 from app.models import Appointment, AppointmentStatus, User, Service
 
 
+
+WEEKDAY_RU_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
+def weekday_ru_full(dt: datetime) -> str:
+    return WEEKDAY_RU_FULL[dt.weekday()]
+
 REMINDER_48H_TEMPLATE = (
     "👋 Здравствуйте!\n\n"
     "Напоминаем о вашей записи:\n"
@@ -41,7 +47,7 @@ def _fmt_date(dt: datetime, tz_name: str) -> tuple[str, str]:
         local = dt.astimezone(tz)
     except Exception:
         local = dt
-    return local.strftime("%d.%m.%Y"), local.strftime("%H:%M")
+    return f"{weekday_ru_full(local)}, {local.strftime('%d.%m.%Y')}", local.strftime('%H:%M')
 
 
 async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:

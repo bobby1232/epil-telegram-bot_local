@@ -4,6 +4,26 @@ from typing import Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from app.models import Service, Appointment
 
+
+STATUS_RU = {
+    "Hold": "Ожидает подтверждения",
+    "Booked": "Подтверждено",
+    "Canceled": "Отменено",
+}
+
+def status_ru(v: str) -> str:
+    return STATUS_RU.get(v, v)
+
+WEEKDAY_RU_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+WEEKDAY_RU_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
+def weekday_ru_short(d: date) -> str:
+    return WEEKDAY_RU_SHORT[d.weekday()]
+
+def weekday_ru_full(dt: datetime) -> str:
+    return WEEKDAY_RU_FULL[dt.weekday()]
+
+
 def main_menu_kb() -> ReplyKeyboardMarkup:
     kb = [
         ["Записаться", "Цены и услуги"],
@@ -38,7 +58,7 @@ def services_kb(services: list[Service]) -> InlineKeyboardMarkup:
 def dates_kb(dates: list[date]) -> InlineKeyboardMarkup:
     rows = []
     for d in dates:
-        rows.append([InlineKeyboardButton(d.strftime("%d.%m (%a)"), callback_data=f"date:{d.isoformat()}")])
+        rows.append([InlineKeyboardButton(f"{d.strftime('%d.%m')} ({weekday_ru_short(d)})", callback_data=f"date:{d.isoformat()}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:services")])
     return InlineKeyboardMarkup(rows)
 
@@ -68,19 +88,23 @@ def admin_request_kb(appt_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Написать клиенту", callback_data=f"adm:msg:{appt_id}")],
     ])
 
+
+
 def my_appts_kb(appts: list[Appointment], tz: Optional[tzinfo] = None) -> InlineKeyboardMarkup:
-    """Upcoming appointments list (client)."""
     rows = []
+
     for a in appts:
         dt = a.start_dt.astimezone(tz) if tz else a.start_dt.astimezone()
         rows.append([
             InlineKeyboardButton(
-                f"#{a.id} • {dt.strftime('%d.%m %H:%M')} • {a.status.value}",
+                f"#{a.id} • {dt.strftime('%d.%m %H:%M')} • {status_ru(a.status.value)}",
                 callback_data=f"my:{a.id}"
             )
         ])
+
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
+
 
 def my_history_kb(appts: list[Appointment], tz: Optional[tzinfo] = None) -> InlineKeyboardMarkup:
     """Past appointments list (client history)."""
