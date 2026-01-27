@@ -50,7 +50,7 @@ def load_config() -> Config:
         min_lead_time_min=_get_int("MIN_LEAD_TIME_MIN", 120),
         booking_horizon_days=_get_int("BOOKING_HORIZON_DAYS", 14),
         hold_ttl_min=_get_int("HOLD_TTL_MIN", 1),
-        cancel_limit_hours=_get_int("CANCEL_LIMIT_HOURS", 12),
+        cancel_limit_hours=_get_int("CANCEL_LIMIT_HOURS", 2),
         work_start=os.getenv("WORK_START", "10:00").strip(),
         work_end=os.getenv("WORK_END", "20:00").strip(),
         work_days=os.getenv("WORK_DAYS", "0,1,2,3,4,5").strip(),  # 0=Mon

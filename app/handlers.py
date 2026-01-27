@@ -804,7 +804,8 @@ async def admin_action_msg(update: Update, context: ContextTypes.DEFAULT_TYPE, a
     async with session_factory() as s:
         appt = await get_appointment(s, appt_id)
     await update.callback_query.message.edit_text(
-        f"TG ID клиента: {appt.client.tg_id}\n@{appt.client.username or '—'}"
+        f"TG ID клиента: {appt.client.tg_id}\n@{appt.client.username or '—'}",
+        reply_markup=admin_request_kb(appt_id)
     )
 
 async def reminder_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
