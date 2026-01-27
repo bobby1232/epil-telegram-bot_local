@@ -33,7 +33,11 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
 
 def phone_request_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📞 Отправить телефон", request_contact=True)], ["⬅️ Назад"]],
+        [
+            [KeyboardButton("📞 Отправить телефон", request_contact=True)],
+            ["⏭️ Пропустить телефон"],
+            ["⬅️ Назад"],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
