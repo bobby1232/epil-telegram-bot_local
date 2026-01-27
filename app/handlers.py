@@ -303,7 +303,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await admin_start_reschedule(update, context, appt_id)
 
     if data.startswith("admtime:"):
-        slot_iso = data.split(":")[1]
+        slot_iso = data.split(":", 1)[1]
         return await admin_pick_time_from_slots(update, context, slot_iso)
 
     if data == "back:main":
