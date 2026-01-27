@@ -241,6 +241,7 @@ async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Теперь отправь телефон кнопкой 👇\n"
+        "Или нажми «Пропустить телефон», если не хочешь оставлять номер.\n"
         "Если кнопки нет — нажми /start и снова «Записаться».",
         reply_markup=phone_request_kb()
     )
@@ -261,24 +262,32 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    # 1) достаём телефон: контакт или текст
+    # 1) достаём телефон: контакт или текст (или пропуск)
     phone = None
+    skip_phone = False
     if msg.contact and msg.contact.phone_number:
         phone = msg.contact.phone_number
     else:
         txt = (msg.text or "").strip()
-        ok = all(ch.isdigit() or ch in "+-() " for ch in txt) and any(ch.isdigit() for ch in txt)
-        if ok:
-            phone = txt
+        normalized = txt.lower()
+        if normalized in {"-", "пропустить", "пропустить телефон", "без телефона", "⏭️ пропустить телефон"}:
+            skip_phone = True
+        else:
+            ok = all(ch.isdigit() or ch in "+-() " for ch in txt) and any(ch.isdigit() for ch in txt)
+            if ok:
+                phone = txt
 
-    if not phone:
-        await msg.reply_text("Не вижу номер телефона. Нажми кнопку «Отправить телефон» 👇")
+    if not phone and not skip_phone:
+        await msg.reply_text(
+            "Не вижу номер телефона. Нажми кнопку «Отправить телефон» или «Пропустить телефон» 👇"
+        )
         return
 
     # нормализация
-    phone = (phone or "").strip()
-    for ch in [" ", "-", "(", ")", "\u00A0"]:
-        phone = phone.replace(ch, "")
+    if phone:
+        phone = (phone or "").strip()
+        for ch in [" ", "-", "(", ")", "\u00A0"]:
+            phone = phone.replace(ch, "")
 
     cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
@@ -288,7 +297,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     slot_iso = context.user_data.get(K_SLOT)
     comment = context.user_data.get(K_COMMENT)
 
-    # 3) сохраняем телефон + создаём заявку
+    # 3) сохраняем телефон (если есть) + создаём заявку
     async with session_factory() as s:
         # гарантируем пользователя
         client = await upsert_user(
@@ -297,7 +306,8 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username=update.effective_user.username,
             full_name=update.effective_user.full_name,
         )
-        await set_user_phone(s, update.effective_user.id, phone)
+        if phone:
+            await set_user_phone(s, update.effective_user.id, phone)
 
         settings = await get_settings(s, cfg.timezone)
 
@@ -305,9 +315,9 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not svc_id or not slot_iso:
             context.user_data["awaiting_phone"] = False
             await s.commit()
+            prefix = "Телефон сохранён ✅\n" if phone else ""
             await msg.reply_text(
-                "Телефон сохранён ✅\n"
-                "Но я не вижу выбранную услугу/время. Начни запись заново: /start → «Записаться».",
+                f"{prefix}Но я не вижу выбранную услугу/время. Начни запись заново: /start → «Записаться».",
                 reply_markup=main_menu_kb(),
             )
             return
@@ -319,9 +329,9 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not service:
             context.user_data["awaiting_phone"] = False
             await s.commit()
+            prefix = "Телефон сохранён ✅\n" if phone else ""
             await msg.reply_text(
-                "Телефон сохранён ✅\n"
-                "Выбранная услуга недоступна. Начни запись заново: /start → «Записаться».",
+                f"{prefix}Выбранная услуга недоступна. Начни запись заново: /start → «Записаться».",
                 reply_markup=main_menu_kb(),
             )
             return
@@ -385,7 +395,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{service.name}\n"
                 f"{local_dt.strftime('%d.%m %H:%M')}\n"
                 f"Клиент: {client_name}\n"
-                f"Телефон: {phone}\n"
+                f"Телефон: {phone or '—'}\n"
                 f"Комментарий: {comment or '—'}"
             ),
             reply_markup=admin_request_kb(appt.id),
