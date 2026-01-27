@@ -194,6 +194,65 @@ async def list_available_slots_for_duration(
 
     return slots
 
+async def list_available_break_slots(
+    session: AsyncSession,
+    settings: SettingsView,
+    day: date,
+    duration_min: int,
+) -> list[datetime]:
+    now_local = _to_tz(datetime.now(tz=pytz.UTC), settings.tz)
+    earliest_local = now_local + timedelta(minutes=settings.min_lead_time_min)
+
+    work_start_local = settings.tz.localize(datetime.combine(day, settings.work_start))
+    work_end_local = settings.tz.localize(datetime.combine(day, settings.work_end))
+
+    step = settings.slot_step_min
+    cursor = _round_slot(work_start_local, step)
+    slots: list[datetime] = []
+
+    window_start_utc = _to_utc(work_start_local, settings.tz)
+    window_end_utc = _to_utc(work_end_local + timedelta(hours=6), settings.tz)
+
+    appts = (await session.execute(
+        select(Appointment).where(
+            and_(
+                Appointment.start_dt < window_end_utc,
+                Appointment.end_dt > window_start_utc,
+                Appointment.status.in_([AppointmentStatus.Hold, AppointmentStatus.Booked])
+            )
+        )
+    )).scalars().all()
+
+    blocks = (await session.execute(
+        select(BlockedInterval).where(
+            and_(
+                BlockedInterval.start_dt < window_end_utc,
+                BlockedInterval.end_dt > window_start_utc
+            )
+        )
+    )).scalars().all()
+
+    def overlaps(start_utc: datetime, end_utc: datetime) -> bool:
+        for a in appts:
+            if a.start_dt < end_utc and a.end_dt > start_utc:
+                return True
+        for b in blocks:
+            if b.start_dt < end_utc and b.end_dt > start_utc:
+                return True
+        return False
+
+    while cursor < work_end_local:
+        if cursor >= earliest_local:
+            end_local = cursor + timedelta(minutes=duration_min)
+            if end_local <= work_end_local:
+                s_utc = _to_utc(cursor, settings.tz)
+                e_utc = _to_utc(end_local, settings.tz)
+                if not overlaps(s_utc, e_utc):
+                    slots.append(cursor)
+        cursor += timedelta(minutes=step)
+
+    return slots
+
 def _advisory_key_for_slot(start_utc: datetime, service_id: int) -> int:
     base = f"{int(start_utc.timestamp())}:{service_id}".encode()
     h = hashlib.sha256(base).digest()
@@ -372,6 +431,53 @@ async def check_slot_available_for_duration(
     end_local = compute_slot_end_for_duration(start_local, duration_min, service, settings)
     end_utc = _to_utc(end_local, settings.tz)
     await _ensure_slot_available(session, start_utc, end_utc, service.id)
+
+async def create_blocked_interval(
+    session: AsyncSession,
+    settings: SettingsView,
+    start_local: datetime,
+    duration_min: int,
+    *,
+    created_by_admin: int,
+    reason: str = "Перерыв",
+) -> BlockedInterval:
+    now_utc = datetime.now(tz=pytz.UTC)
+    start_utc = _to_utc(start_local, settings.tz)
+    end_local = start_local + timedelta(minutes=duration_min)
+    end_utc = _to_utc(end_local, settings.tz)
+
+    overlap = await session.execute(
+        select(Appointment.id).where(
+            and_(
+                Appointment.start_dt < end_utc,
+                Appointment.end_dt > start_utc,
+                Appointment.status.in_([AppointmentStatus.Hold, AppointmentStatus.Booked])
+            )
+        ).limit(1)
+    )
+    if overlap.first():
+        raise ValueError("SLOT_TAKEN")
+
+    block_overlap = await session.execute(
+        select(BlockedInterval.id).where(
+            and_(
+                BlockedInterval.start_dt < end_utc,
+                BlockedInterval.end_dt > start_utc
+            )
+        ).limit(1)
+    )
+    if block_overlap.first():
+        raise ValueError("SLOT_BLOCKED")
+
+    block = BlockedInterval(
+        start_dt=start_utc,
+        end_dt=end_utc,
+        reason=reason,
+        created_at=now_utc,
+        created_by_admin=created_by_admin,
+    )
+    session.add(block)
+    return block
 
 async def request_reschedule(
     session: AsyncSession,

@@ -15,6 +15,8 @@ from app import texts, keyboards
 # states
 SVC, DAY, TIME, COMMENT, PHONE, FINAL = range(6)
 
+RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
 
 def _tz(context: ContextTypes.DEFAULT_TYPE) -> pytz.BaseTzInfo:
     # ✅ Не падаем KeyError, если tz не задан
@@ -95,7 +97,7 @@ async def pick_service_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     rows = []
     for i in range(horizon):
         d = today + timedelta(days=i)
-        rows.append([InlineKeyboardButton(d.strftime("%a %d.%m"), callback_data=f"day:{d.isoformat()}")])
+        rows.append([InlineKeyboardButton(f"{RU_WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}", callback_data=f"day:{d.isoformat()}")])
 
     rows.append([InlineKeyboardButton("↩️ Назад", callback_data="day:back")])
     await query.edit_message_text("Выберите дату:", reply_markup=InlineKeyboardMarkup(rows))

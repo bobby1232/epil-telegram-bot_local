@@ -16,7 +16,7 @@ from app.logic import (
     admin_list_appointments_for_day, admin_list_holds, create_admin_appointment,
     create_admin_appointment_with_duration, check_slot_available,
     check_slot_available_for_duration, compute_slot_end, compute_slot_end_for_duration,
-    admin_cancel_appointment,
+    admin_cancel_appointment, list_available_break_slots, create_blocked_interval,
     admin_reschedule_appointment
 )
 from app.keyboards import (
@@ -24,7 +24,8 @@ from app.keyboards import (
     admin_request_kb, my_appts_kb, my_appt_actions_kb, reminder_kb, admin_menu_kb,
     reschedule_dates_kb, reschedule_slots_kb, reschedule_confirm_kb, admin_reschedule_kb,
     admin_services_kb, admin_dates_kb, admin_slots_kb, admin_manage_appt_kb,
-    admin_reschedule_dates_kb, admin_reschedule_slots_kb, admin_reschedule_confirm_kb
+    admin_reschedule_dates_kb, admin_reschedule_slots_kb, admin_reschedule_confirm_kb,
+    break_dates_kb, break_slots_kb
 )
 from app.models import AppointmentStatus
 from app.utils import format_price
@@ -52,6 +53,9 @@ K_ADMIN_RESCHED_APPT = "admin_resched_appt_id"
 K_ADMIN_RESCHED_SVC = "admin_resched_svc_id"
 K_ADMIN_RESCHED_DATE = "admin_resched_date"
 K_ADMIN_RESCHED_SLOT = "admin_resched_slot_iso"
+K_BREAK_DATE = "break_date"
+K_BREAK_DURATION = "break_duration_min"
+K_BREAK_TIME_ERRORS = "break_time_errors"
 
 def is_admin(cfg: Config, user_id: int) -> bool:
     return user_id == cfg.admin_telegram_id
@@ -94,6 +98,12 @@ def _clear_admin_reschedule(context: ContextTypes.DEFAULT_TYPE) -> None:
     ):
         context.user_data.pop(key, None)
 
+def _clear_break(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (K_BREAK_DATE, K_BREAK_DURATION, K_BREAK_TIME_ERRORS):
+        context.user_data.pop(key, None)
+    for flag in ("awaiting_break_duration", "awaiting_break_time"):
+        context.user_data.pop(flag, None)
+
 def _normalize_phone(value: str) -> str:
     phone = (value or "").strip()
     for ch in [" ", "-", "(", ")", "\u00A0"]:
@@ -122,6 +132,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Админ-панель 👇", reply_markup=admin_menu_kb())
 
 async def unified_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_break_duration"):
+        return await handle_break_duration(update, context)
+    if context.user_data.get("awaiting_break_time"):
+        return await handle_break_time(update, context)
     if context.user_data.get("awaiting_admin_duration"):
         return await handle_admin_duration(update, context)
     if context.user_data.get("awaiting_admin_time"):
@@ -168,6 +182,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await admin_holds_view(update, context)
         if txt == "📝 Записать клиента":
             return await admin_start_booking(update, context)
+        if txt == "⏸ Перерыв":
+            return await admin_start_break(update, context)
         if txt == "⬅️ В главное меню":
             await update.message.reply_text("Главное меню 👇", reply_markup=main_menu_for(update, context))
             return
@@ -268,6 +284,10 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[K_ADMIN_DATE] = data.split(":")[1]
         return await admin_prompt_duration(update, context)
 
+    if data.startswith("breakdate:"):
+        context.user_data[K_BREAK_DATE] = data.split(":")[1]
+        return await admin_break_prompt_duration(update, context)
+
     if data.startswith("slot:"):
         context.user_data[K_SLOT] = data.split("slot:")[1]
         if context.user_data.get(K_RESCHED_APPT):
@@ -306,6 +326,10 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         slot_iso = data.split(":", 1)[1]
         return await admin_pick_time_from_slots(update, context, slot_iso)
 
+    if data.startswith("breaktime:"):
+        slot_iso = data.split(":", 1)[1]
+        return await admin_pick_break_time(update, context, slot_iso)
+
     if data == "back:main":
         await query.message.reply_text("Главное меню 👇", reply_markup=main_menu_for(update, context))
         return
@@ -321,6 +345,9 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "admback:dates":
         return await admin_flow_dates(update, context)
+
+    if data == "breakback:dates":
+        return await admin_start_break(update, context)
 
     if data == "myback:list":
         return await show_my_appointments_from_cb(update, context)
@@ -400,6 +427,23 @@ async def admin_flow_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dates = await list_available_dates(s, settings)
     await update.callback_query.message.edit_text("Выбери дату для записи:", reply_markup=admin_dates_kb(dates))
 
+async def admin_start_break(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        return await update.effective_message.reply_text("Нет доступа.")
+    _clear_break(context)
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        dates = await list_available_dates(s, settings)
+    await update.effective_message.reply_text("Выбери день перерыва:", reply_markup=break_dates_kb(dates))
+
+async def admin_break_prompt_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["awaiting_break_duration"] = True
+    await update.callback_query.message.edit_text(
+        "Укажи длительность перерыва в минутах (например, 30)."
+    )
+
 async def admin_prompt_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_admin_duration"] = True
     await update.callback_query.message.edit_text(
@@ -442,6 +486,36 @@ async def _admin_send_time_prompt(update: Update, context: ContextTypes.DEFAULT_
         f"{slots_hint}\n"
         "Можно выбрать время кнопкой ниже.",
         reply_markup=admin_slots_kb(slots),
+    )
+
+async def _send_break_time_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = context.bot_data["cfg"]
+    day_iso = context.user_data.get(K_BREAK_DATE)
+    duration_min = context.user_data.get(K_BREAK_DURATION)
+    if not day_iso or not duration_min:
+        _clear_break(context)
+        await update.effective_message.reply_text("Сессия сброшена. Начни заново.", reply_markup=admin_menu_kb())
+        return
+
+    day = date.fromisoformat(day_iso)
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        slots = await list_available_break_slots(s, settings, day, int(duration_min))
+
+    context.user_data["awaiting_break_time"] = True
+    slots_hint = "Свободных слотов нет."
+    if slots:
+        slots_hint = "Свободные слоты: " + ", ".join(st.strftime("%H:%M") for st in slots[:12])
+        if len(slots) > 12:
+            slots_hint += " и ещё…"
+
+    await update.effective_message.reply_text(
+        "Выбери время начала перерыва в формате HH:MM (например, 14:30).\n"
+        f"Длительность: {int(duration_min)} мин.\n"
+        f"{slots_hint}\n"
+        "Можно выбрать время кнопкой ниже.",
+        reply_markup=break_slots_kb(slots),
     )
 
 async def flow_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -688,6 +762,26 @@ async def handle_admin_duration(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["awaiting_admin_duration"] = False
     await _admin_send_time_prompt(update, context)
 
+async def handle_break_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_break_duration"):
+        return
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        _clear_break(context)
+        return await update.message.reply_text("Нет доступа.")
+
+    text = (update.message.text or "").strip()
+    if not text.isdigit():
+        return await update.message.reply_text("Нужно число минут, например 30.")
+
+    duration = int(text)
+    if duration <= 0:
+        return await update.message.reply_text("Длительность должна быть больше 0.")
+
+    context.user_data[K_BREAK_DURATION] = duration
+    context.user_data["awaiting_break_duration"] = False
+    await _send_break_time_prompt(update, context)
+
 async def admin_pick_time_from_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, slot_iso: str):
     query = update.callback_query
     if not query:
@@ -830,6 +924,105 @@ async def handle_admin_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(K_ADMIN_TIME_ERRORS, None)
     context.user_data["awaiting_admin_client_name"] = True
     await update.message.reply_text("Введи имя клиента.")
+
+async def admin_pick_break_time(update: Update, context: ContextTypes.DEFAULT_TYPE, slot_iso: str):
+    query = update.callback_query
+    if not query:
+        return
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        _clear_break(context)
+        return await query.message.reply_text("Нет доступа.")
+
+    try:
+        start_local = datetime.fromisoformat(slot_iso)
+    except ValueError:
+        return await query.message.reply_text("Не удалось распознать время. Попробуй ещё раз.")
+
+    await _finalize_break(query.message, context, start_local)
+
+async def handle_break_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_break_time"):
+        return
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        _clear_break(context)
+        return await update.message.reply_text("Нет доступа.")
+
+    text = (update.message.text or "").strip()
+    try:
+        hh, mm = text.split(":")
+        t = time(int(hh), int(mm))
+    except ValueError:
+        return await update.message.reply_text("Нужно время в формате HH:MM, например 14:30.")
+
+    day_iso = context.user_data.get(K_BREAK_DATE)
+    if not day_iso:
+        _clear_break(context)
+        return await update.message.reply_text("Сессия сброшена. Начни заново.", reply_markup=admin_menu_kb())
+
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        day = date.fromisoformat(day_iso)
+        start_local = settings.tz.localize(datetime.combine(day, t))
+        duration_min = int(context.user_data.get(K_BREAK_DURATION, 0))
+        if duration_min <= 0:
+            _clear_break(context)
+            return await update.message.reply_text("Сессия сброшена. Начни заново.", reply_markup=admin_menu_kb())
+        slots = await list_available_break_slots(s, settings, day, duration_min)
+
+    if start_local not in slots:
+        errors = int(context.user_data.get(K_BREAK_TIME_ERRORS, 0)) + 1
+        context.user_data[K_BREAK_TIME_ERRORS] = errors
+        if errors >= 3:
+            _clear_break(context)
+            return await update.message.reply_text(
+                "Слишком много ошибок. Начни заново.", reply_markup=admin_menu_kb()
+            )
+        return await update.message.reply_text("Этот слот недоступен. Выбери другое время.")
+
+    await _finalize_break(update.message, context, start_local)
+
+async def _finalize_break(message, context: ContextTypes.DEFAULT_TYPE, start_local: datetime) -> None:
+    cfg: Config = context.bot_data["cfg"]
+    day_iso = context.user_data.get(K_BREAK_DATE)
+    duration_min = int(context.user_data.get(K_BREAK_DURATION, 0))
+    if not day_iso or duration_min <= 0:
+        _clear_break(context)
+        await message.reply_text("Сессия сброшена. Начни заново.", reply_markup=admin_menu_kb())
+        return
+
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        async with s.begin():
+            settings = await get_settings(s, cfg.timezone)
+            try:
+                await create_blocked_interval(
+                    s,
+                    settings,
+                    start_local,
+                    duration_min,
+                    created_by_admin=int(cfg.admin_telegram_id),
+                )
+            except ValueError as e:
+                code = str(e)
+                if code == "SLOT_TAKEN":
+                    await message.reply_text("Этот слот уже занят. Выбери другое время.")
+                    return
+                if code == "SLOT_BLOCKED":
+                    await message.reply_text("Этот слот уже заблокирован. Выбери другое время.")
+                    return
+                raise
+
+    _clear_break(context)
+    end_local = start_local + timedelta(minutes=duration_min)
+    await message.reply_text(
+        f"Перерыв добавлен ✅\n"
+        f"Дата: {start_local.strftime('%d.%m')}\n"
+        f"Время: {start_local.strftime('%H:%M')}–{end_local.strftime('%H:%M')}",
+        reply_markup=admin_menu_kb(),
+    )
 
 async def handle_admin_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_admin_client_name"):

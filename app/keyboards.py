@@ -12,8 +12,13 @@ STATUS_RU = {
     "Completed": "Завершена",
 }
 
+RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
 def status_ru(v: str) -> str:
     return STATUS_RU.get(v, v)
+
+def _format_date_ru(d: date) -> str:
+    return f"{d.strftime('%d.%m')} ({RU_WEEKDAYS[d.weekday()]})"
 
 def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     kb = [
@@ -31,6 +36,7 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
         ["📅 Записи сегодня", "📅 Записи завтра"],
         ["🧾 Все заявки (Ожидание)"],
         ["📝 Записать клиента"],
+        ["⏸ Перерыв"],
         ["⬅️ В главное меню"],
     ]
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
@@ -65,15 +71,22 @@ def admin_services_kb(services: list[Service]) -> InlineKeyboardMarkup:
 def dates_kb(dates: list[date]) -> InlineKeyboardMarkup:
     rows = []
     for d in dates:
-        rows.append([InlineKeyboardButton(d.strftime("%d.%m (%a)"), callback_data=f"date:{d.isoformat()}")])
+        rows.append([InlineKeyboardButton(_format_date_ru(d), callback_data=f"date:{d.isoformat()}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:services")])
     return InlineKeyboardMarkup(rows)
 
 def admin_dates_kb(dates: list[date]) -> InlineKeyboardMarkup:
     rows = []
     for d in dates:
-        rows.append([InlineKeyboardButton(d.strftime("%d.%m (%a)"), callback_data=f"admdate:{d.isoformat()}")])
+        rows.append([InlineKeyboardButton(_format_date_ru(d), callback_data=f"admdate:{d.isoformat()}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admback:services")])
+    return InlineKeyboardMarkup(rows)
+
+def break_dates_kb(dates: list[date]) -> InlineKeyboardMarkup:
+    rows = []
+    for d in dates:
+        rows.append([InlineKeyboardButton(_format_date_ru(d), callback_data=f"breakdate:{d.isoformat()}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 
 def admin_slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
@@ -87,6 +100,19 @@ def admin_slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admback:dates")])
+    return InlineKeyboardMarkup(rows)
+
+def break_slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for dt in slots_local:
+        row.append(InlineKeyboardButton(dt.strftime("%H:%M"), callback_data=f"breaktime:{dt.isoformat()}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="breakback:dates")])
     return InlineKeyboardMarkup(rows)
 
 def slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
@@ -144,7 +170,7 @@ def my_appt_actions_kb(appt_id: int) -> InlineKeyboardMarkup:
 def reschedule_dates_kb(dates: list[date]) -> InlineKeyboardMarkup:
     rows = []
     for d in dates:
-        rows.append([InlineKeyboardButton(d.strftime("%d.%m (%a)"), callback_data=f"rdate:{d.isoformat()}")])
+        rows.append([InlineKeyboardButton(_format_date_ru(d), callback_data=f"rdate:{d.isoformat()}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="myback:list")])
     return InlineKeyboardMarkup(rows)
 
@@ -176,7 +202,7 @@ def admin_reschedule_kb(appt_id: int) -> InlineKeyboardMarkup:
 def admin_reschedule_dates_kb(dates: list[date]) -> InlineKeyboardMarkup:
     rows = []
     for d in dates:
-        rows.append([InlineKeyboardButton(d.strftime("%d.%m (%a)"), callback_data=f"admresched:date:{d.isoformat()}")])
+        rows.append([InlineKeyboardButton(_format_date_ru(d), callback_data=f"admresched:date:{d.isoformat()}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 

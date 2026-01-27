@@ -5,8 +5,8 @@ from dataclasses import dataclass
 class Defaults:
     # Baseline config (зафиксированные дефолты)
     WORK_DAYS = [0, 1, 2, 3, 4, 5]   # Mon-Sat
-    WORK_START = "10:00"
-    WORK_END = "20:00"
+    WORK_START = "09:00"
+    WORK_END = "20:30"
 
     SLOT_STEP_MIN = 30
     BUFFER_MIN = 10
