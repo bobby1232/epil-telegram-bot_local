@@ -1,9 +1,10 @@
 from dotenv import load_dotenv
+from sqlalchemy import select
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 from app.config import load_config
 from app.db import make_engine, make_session_factory
-from app.models import Base
+from app.models import Base, Setting
 from app.logic import seed_defaults_if_needed, ensure_default_services
 from app.handlers import cmd_start, cb_router, handle_contact, unified_text_router
 from app.scheduler import tick
@@ -35,6 +36,13 @@ async def seed_db(session_factory, cfg):
         async with s.begin():
             await seed_defaults_if_needed(s, defaults=defaults)
             await ensure_default_services(s)
+            setting = (await s.execute(
+                select(Setting).where(Setting.key == "cancel_limit_hours")
+            )).scalar_one_or_none()
+            if setting:
+                setting.value = str(cfg.cancel_limit_hours)
+            else:
+                s.add(Setting(key="cancel_limit_hours", value=str(cfg.cancel_limit_hours)))
 
 
 def main():
