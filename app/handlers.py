@@ -1493,9 +1493,10 @@ async def flow_reschedule_dates(update: Update, context: ContextTypes.DEFAULT_TY
 async def flow_reschedule_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_factory = context.bot_data["session_factory"]
     cfg: Config = context.bot_data["cfg"]
+    appt_id = context.user_data.get(K_RESCHED_APPT)
     svc_id = context.user_data.get(K_RESCHED_SVC)
     day_iso = context.user_data.get(K_RESCHED_DATE) or context.user_data.get(K_DATE)
-    if not svc_id or not day_iso:
+    if not svc_id or not day_iso or not appt_id:
         return await update.callback_query.message.edit_text("Сессия сброшена. Нажми «Мои записи» и начни перенос заново.")
     day = date.fromisoformat(day_iso)
 
@@ -1505,7 +1506,10 @@ async def flow_reschedule_slots(update: Update, context: ContextTypes.DEFAULT_TY
         service = next((x for x in services if x.id == svc_id), None)
         if not service:
             return await update.callback_query.message.edit_text("Услуга недоступна.")
-        slots = await list_available_slots_for_service(s, settings, service, day)
+        appt = await get_appointment(s, appt_id)
+        duration_total = int((appt.end_dt - appt.start_dt).total_seconds() / 60)
+        base_duration = max(1, duration_total - int(service.buffer_min) - int(settings.buffer_min))
+        slots = await list_available_slots_for_duration(s, settings, service, day, base_duration)
 
     if not slots:
         return await update.callback_query.message.edit_text("На эту дату нет свободных слотов. Выбери другую дату.")
@@ -1697,9 +1701,10 @@ async def admin_flow_reschedule_dates(update: Update, context: ContextTypes.DEFA
 async def admin_flow_reschedule_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_factory = context.bot_data["session_factory"]
     cfg: Config = context.bot_data["cfg"]
+    appt_id = context.user_data.get(K_ADMIN_RESCHED_APPT)
     svc_id = context.user_data.get(K_ADMIN_RESCHED_SVC)
     day_iso = context.user_data.get(K_ADMIN_RESCHED_DATE)
-    if not svc_id or not day_iso:
+    if not svc_id or not day_iso or not appt_id:
         return await update.callback_query.message.edit_text("Сессия сброшена. Начни перенос заново.")
     day = date.fromisoformat(day_iso)
 
@@ -1709,7 +1714,10 @@ async def admin_flow_reschedule_slots(update: Update, context: ContextTypes.DEFA
         service = next((x for x in services if x.id == svc_id), None)
         if not service:
             return await update.callback_query.message.edit_text("Услуга недоступна.")
-        slots = await list_available_slots_for_service(s, settings, service, day)
+        appt = await get_appointment(s, appt_id)
+        duration_total = int((appt.end_dt - appt.start_dt).total_seconds() / 60)
+        base_duration = max(1, duration_total - int(service.buffer_min) - int(settings.buffer_min))
+        slots = await list_available_slots_for_duration(s, settings, service, day, base_duration)
 
     if not slots:
         return await update.callback_query.message.edit_text("На эту дату нет свободных слотов. Выбери другую дату.")
