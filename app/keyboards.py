@@ -247,6 +247,12 @@ def admin_reschedule_confirm_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data="admresched:back:dates")],
     ])
 
+def admin_visit_confirm_kb(appt_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить визит", callback_data=f"adm:visit:confirm:{appt_id}")],
+        [InlineKeyboardButton("✏️ Скорректировать цену", callback_data=f"adm:visit:price:{appt_id}")],
+    ])
+
 def reminder_kb(appt_id: int, *, allow_reschedule: bool = False) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("✅ Подтвердить визит", callback_data=f"r:confirm:{appt_id}")]]
     if allow_reschedule:

@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Appointment, AppointmentStatus, User, Service
 from app.logic import get_settings
-from app.keyboards import reminder_kb
+from app.keyboards import reminder_kb, admin_visit_confirm_kb
 from app.utils import format_price, appointment_services_label
 from texts import AFTERCARE_RECOMMENDATIONS_PARTS
 
@@ -65,6 +65,17 @@ def _localize(dt: datetime, tz) -> datetime:
 def _format_hours(total_hours: float) -> str:
     formatted = f"{total_hours:.2f}".rstrip("0").rstrip(".")
     return formatted or "0"
+
+def _admin_ids(cfg) -> tuple[int, ...]:
+    if cfg is None:
+        return tuple()
+    ids = getattr(cfg, "admin_telegram_ids", None)
+    if ids:
+        return tuple(ids)
+    admin_id = getattr(cfg, "admin_telegram_id", None)
+    if admin_id:
+        return (int(admin_id),)
+    return tuple()
 
 
 async def _send_earnings_report(
@@ -134,6 +145,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     if session_factory is None:
         # если у тебя session_factory хранится иначе — скажи, поменяю
         return
+    cfg = app.bot_data.get("cfg")
 
     tz_name = app.bot_data.get("tz", "Europe/Moscow")
     now = _utcnow()
@@ -244,22 +256,49 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         appts_aftercare = list(res_aftercare.scalars().all())
 
         for appt in appts_aftercare:
-            if not appt.client or not appt.client.tg_id:
-                continue
-
-            try:
-                for part in AFTERCARE_RECOMMENDATIONS_PARTS:
-                    await context.bot.send_message(
-                        chat_id=appt.client.tg_id,
-                        text=part,
-                    )
-                await session.execute(
-                    update(Appointment)
-                    .where(Appointment.id == appt.id)
-                    .values(status=AppointmentStatus.Completed, updated_at=_utcnow())
+            admin_ids = _admin_ids(cfg)
+            if admin_ids:
+                date_label, time_label = _fmt_date(appt.start_dt, tz_name)
+                price_label = format_price(
+                    appt.price_override if appt.price_override is not None else appt.service.price
                 )
-            except Exception:
-                continue
+                client_label = appt.client.full_name or (
+                    f"@{appt.client.username}" if appt.client.username else str(appt.client.tg_id)
+                )
+                service_label = appointment_services_label(appt)
+                text = (
+                    "✅ Визит завершён.\n"
+                    "Подтверди финальную стоимость для учёта:\n"
+                    f"{date_label} {time_label}\n"
+                    f"Услуга: {service_label}\n"
+                    f"Клиент: {client_label}\n"
+                    f"Цена: {price_label}"
+                )
+                for admin_id in admin_ids:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=text,
+                            reply_markup=admin_visit_confirm_kb(appt.id),
+                        )
+                    except Exception:
+                        continue
+
+            if appt.client and appt.client.tg_id:
+                try:
+                    for part in AFTERCARE_RECOMMENDATIONS_PARTS:
+                        await context.bot.send_message(
+                            chat_id=appt.client.tg_id,
+                            text=part,
+                        )
+                except Exception:
+                    pass
+
+            await session.execute(
+                update(Appointment)
+                .where(Appointment.id == appt.id)
+                .values(status=AppointmentStatus.Completed, updated_at=_utcnow())
+            )
 
         await session.commit()
 

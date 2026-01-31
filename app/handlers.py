@@ -33,7 +33,7 @@ from app.keyboards import (
     admin_services_kb, admin_dates_kb, admin_slots_kb, admin_manage_appt_kb,
     admin_reschedule_dates_kb, admin_reschedule_slots_kb, admin_reschedule_confirm_kb,
     break_dates_kb, break_slots_kb, status_ru, RU_WEEKDAYS, cancel_breaks_kb,
-    contacts_kb,
+    contacts_kb, admin_visit_confirm_kb,
 )
 from app.models import AppointmentStatus
 from app.utils import format_price, appointment_services_label
@@ -65,6 +65,7 @@ K_ADMIN_CLIENT_PHONE = "admin_client_phone"
 K_ADMIN_CLIENT_TGID = "admin_client_tg_id"
 K_ADMIN_PRICE = "admin_price_override"
 K_ADMIN_CONFIRM_APPT = "admin_confirm_appt_id"
+K_ADMIN_VISIT_APPT = "admin_visit_appt_id"
 K_ADMIN_TIME_ERRORS = "admin_time_errors"
 K_ADMIN_RESCHED_APPT = "admin_resched_appt_id"
 K_ADMIN_RESCHED_SVC = "admin_resched_svc_id"
@@ -169,6 +170,10 @@ def _clear_admin_confirm(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(K_ADMIN_CONFIRM_APPT, None)
     context.user_data.pop("awaiting_admin_confirm_price", None)
 
+def _clear_admin_visit(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(K_ADMIN_VISIT_APPT, None)
+    context.user_data.pop("awaiting_admin_visit_price", None)
+
 def _clear_break(context: ContextTypes.DEFAULT_TYPE) -> None:
     for key in (K_BREAK_DATE, K_BREAK_DURATION, K_BREAK_TIME_ERRORS):
         context.user_data.pop(key, None)
@@ -230,6 +235,8 @@ async def unified_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await handle_admin_price(update, context)
     if context.user_data.get("awaiting_admin_confirm_price"):
         return await handle_admin_confirm_price(update, context)
+    if context.user_data.get("awaiting_admin_visit_price"):
+        return await handle_admin_visit_price(update, context)
     if context.user_data.get("awaiting_question"):
         return await handle_question(update, context)
     if context.user_data.get("awaiting_comment"):
@@ -480,6 +487,14 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("adm:cancel:"):
         appt_id = int(data.split(":")[2])
         return await admin_cancel(update, context, appt_id)
+
+    if data.startswith("adm:visit:confirm:"):
+        appt_id = int(data.split(":")[3])
+        return await admin_visit_confirm(update, context, appt_id)
+
+    if data.startswith("adm:visit:price:"):
+        appt_id = int(data.split(":")[3])
+        return await admin_visit_price(update, context, appt_id)
 
     if data.startswith("admresched:start:"):
         appt_id = int(data.split(":")[2])
@@ -1356,6 +1371,51 @@ async def handle_admin_confirm_price(update: Update, context: ContextTypes.DEFAU
     _clear_admin_confirm(context)
     await update.message.reply_text("Подтверждено ✅", reply_markup=admin_menu_kb())
 
+async def handle_admin_visit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_admin_visit_price"):
+        return
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        _clear_admin_visit(context)
+        return await update.message.reply_text("Нет доступа.")
+
+    txt = (update.message.text or "").strip()
+    if txt.lower() in {"отмена", "cancel", "/cancel"}:
+        _clear_admin_visit(context)
+        return await update.message.reply_text("Подтверждение отменено.", reply_markup=admin_menu_kb())
+
+    appt_id = context.user_data.get(K_ADMIN_VISIT_APPT)
+    if not appt_id:
+        _clear_admin_visit(context)
+        return await update.message.reply_text("Сессия сброшена. Повтори подтверждение.", reply_markup=admin_menu_kb())
+
+    price_override = None
+    if txt not in {"-", "стандарт", "стандартная"}:
+        try:
+            price_override = float(txt.replace(",", "."))
+        except ValueError:
+            return await update.message.reply_text("Цена должна быть числом. Введи цену или «-».")
+        if price_override < 0:
+            return await update.message.reply_text("Цена не может быть отрицательной. Введи цену или «-».")
+
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        async with s.begin():
+            appt = await get_appointment(s, appt_id)
+            if price_override is not None:
+                appt.price_override = price_override
+            appt.visit_confirmed = True
+            if appt.status == AppointmentStatus.Booked and appt.end_dt <= datetime.now(tz=pytz.UTC):
+                appt.status = AppointmentStatus.Completed
+            appt.updated_at = datetime.now(tz=pytz.UTC)
+            price_label = format_price(appt.price_override if appt.price_override is not None else appt.service.price)
+
+    _clear_admin_visit(context)
+    await update.message.reply_text(
+        f"Готово ✅\nФинальная цена: {price_label}",
+        reply_markup=admin_menu_kb(),
+    )
+
 async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
     session_factory = context.bot_data["session_factory"]
@@ -1734,6 +1794,40 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_
                 except Exception:
                     pass
     await update.callback_query.message.edit_text("Запись отменена ✅")
+
+async def admin_visit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        return await update.callback_query.message.edit_text("Нет доступа.")
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        async with s.begin():
+            appt = await get_appointment(s, appt_id)
+            appt.visit_confirmed = True
+            if appt.status == AppointmentStatus.Booked and appt.end_dt <= datetime.now(tz=pytz.UTC):
+                appt.status = AppointmentStatus.Completed
+            appt.updated_at = datetime.now(tz=pytz.UTC)
+
+    _clear_admin_visit(context)
+    await update.callback_query.message.edit_text("Визит подтверждён ✅")
+
+async def admin_visit_price(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        return await update.callback_query.message.edit_text("Нет доступа.")
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        appt = await get_appointment(s, appt_id)
+        price_label = format_price(appt.price_override if appt.price_override is not None else appt.service.price)
+
+    _clear_admin_visit(context)
+    context.user_data[K_ADMIN_VISIT_APPT] = appt_id
+    context.user_data["awaiting_admin_visit_price"] = True
+    await update.callback_query.message.edit_text(
+        "Введи финальную цену или «-», чтобы оставить текущую.\n"
+        f"Текущая цена: {price_label}\n"
+        "Для отмены отправь /cancel."
+    )
 
 async def admin_start_reschedule(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
     cfg: Config = context.bot_data["cfg"]
