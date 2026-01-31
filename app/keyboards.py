@@ -60,6 +60,25 @@ def services_kb(services: list[Service]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 
+def services_multi_kb(services: list[Service], selected_ids: set[int]) -> InlineKeyboardMarkup:
+    rows = []
+    for s in services:
+        price = format_price(s.price)
+        marker = "✅ " if s.id in selected_ids else ""
+        rows.append([
+            InlineKeyboardButton(
+                f"{marker}{s.name} • {int(s.duration_min)} мин • {price}",
+                callback_data=f"svcsel:{s.id}",
+            )
+        ])
+    action_row = [
+        InlineKeyboardButton("➡️ Далее", callback_data="svcnext"),
+        InlineKeyboardButton("🧹 Сбросить", callback_data="svcclear"),
+    ]
+    rows.append(action_row)
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
+    return InlineKeyboardMarkup(rows)
+
 def admin_services_kb(services: list[Service]) -> InlineKeyboardMarkup:
     rows = []
     for s in services:
