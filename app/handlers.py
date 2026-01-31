@@ -316,7 +316,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await admin_day_view(update, context, offset_days=0)
         if txt == "📅 Записи завтра":
             return await admin_day_view(update, context, offset_days=1)
-        if txt == "📆 Записи недели":
+        if txt == "📆 Записи неделя":
             return await admin_week_view(update, context)
         if txt == "🧾 Все заявки (Ожидание)":
             return await admin_holds_view(update, context)
