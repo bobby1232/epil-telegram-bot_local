@@ -529,8 +529,8 @@ async def request_reschedule(
         raise ValueError("NOT_BOOKED")
     now_utc = datetime.now(tz=pytz.UTC)
     start_utc = _to_utc(new_start_local, settings.tz)
-    end_local = compute_slot_end(new_start_local, appt.service, settings)
-    end_utc = _to_utc(end_local, settings.tz)
+    duration_delta = appt.end_dt - appt.start_dt
+    end_utc = start_utc + duration_delta
 
     lock_key = _advisory_key_for_slot(start_utc, appt.service_id)
     await session.execute(text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=lock_key))
@@ -567,9 +567,8 @@ async def confirm_reschedule(session: AsyncSession, settings: SettingsView, appt
         return
     now_utc = datetime.now(tz=pytz.UTC)
     start_utc = appt.proposed_alt_start_dt
-    start_local = _to_tz(start_utc, settings.tz)
-    end_local = compute_slot_end(start_local, appt.service, settings)
-    end_utc = _to_utc(end_local, settings.tz)
+    duration_delta = appt.end_dt - appt.start_dt
+    end_utc = start_utc + duration_delta
 
     lock_key = _advisory_key_for_slot(start_utc, appt.service_id)
     await session.execute(text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=lock_key))
