@@ -1769,30 +1769,42 @@ def _build_day_timeline(
         for a in appts
     ]
 
-    def slot_emoji(status: AppointmentStatus | None) -> str:
+    def slot_symbol(status: AppointmentStatus | None) -> str:
         if status == AppointmentStatus.Booked:
-            return "🟩"
+            return "■"
         if status == AppointmentStatus.Hold:
-            return "🟦"
-        return "⬜️"
+            return "▣"
+        return "□"
 
     slots: list[str] = []
     cursor = work_start_local
     while cursor < work_end_local:
         status = _slot_status_for_time(cursor, spans)
-        slots.append(f"{cursor.strftime('%H:%M')} {slot_emoji(status)}")
+        slots.append(f"{cursor.strftime('%H:%M')}")
+        cursor += step
+
+    status_symbols = []
+    cursor = work_start_local
+    while cursor < work_end_local:
+        status = _slot_status_for_time(cursor, spans)
+        status_symbols.append(slot_symbol(status))
         cursor += step
 
     lines = ["🧭 График слотов:"]
-    row: list[str] = []
-    for item in slots:
-        row.append(item.ljust(8))
-        if len(row) >= slots_per_line:
-            lines.append(" ".join(row).rstrip())
-            row = []
-    if row:
-        lines.append(" ".join(row).rstrip())
-    lines.append("Легенда: ⬜️ свободно • 🟩 подтверждено • 🟦 ожидает подтверждения")
+    time_row: list[str] = []
+    symbol_row: list[str] = []
+    for time_label, symbol in zip(slots, status_symbols):
+        time_row.append(time_label)
+        symbol_row.append(symbol.center(5))
+        if len(time_row) >= slots_per_line:
+            lines.append(" ".join(time_row))
+            lines.append(" ".join(symbol_row))
+            time_row = []
+            symbol_row = []
+    if time_row:
+        lines.append(" ".join(time_row))
+        lines.append(" ".join(symbol_row))
+    lines.append("Легенда: □ свободно • ■ подтверждено • ▣ ожидает подтверждения")
     return "\n".join(lines)
 
 async def admin_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE, offset_days: int):
