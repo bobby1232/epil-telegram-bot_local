@@ -1803,7 +1803,9 @@ def _build_day_timeline(
     return "\n".join(lines)
 
 def _pick_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    pil_font = os.path.join(os.path.dirname(ImageFont.__file__), "fonts", "DejaVuSans.ttf")
     candidates = [
+        pil_font,
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ]
