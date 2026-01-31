@@ -135,6 +135,15 @@ def break_slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="breakback:dates")])
     return InlineKeyboardMarkup(rows)
 
+def break_repeat_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("Без повторов", callback_data="breakrepeat:none")],
+        [InlineKeyboardButton("Каждый день", callback_data="breakrepeat:daily")],
+        [InlineKeyboardButton("Каждую неделю", callback_data="breakrepeat:weekly")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="breakback:dates")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
 def slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
     rows = []
     row = []

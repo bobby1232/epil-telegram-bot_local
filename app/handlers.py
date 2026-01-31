@@ -23,7 +23,7 @@ from app.logic import (
     create_admin_appointment_with_duration, check_slot_available,
     check_slot_available_for_duration, compute_slot_end, compute_slot_end_for_duration,
     admin_cancel_appointment, list_available_break_slots, create_blocked_interval,
-    admin_reschedule_appointment, admin_list_booked_range, admin_list_appointments_range,
+    admin_reschedule_appointment, admin_list_appointments_range,
     list_future_breaks, delete_blocked_interval, SettingsView
 )
 from app.keyboards import (
@@ -32,7 +32,7 @@ from app.keyboards import (
     reschedule_dates_kb, reschedule_slots_kb, reschedule_confirm_kb, admin_reschedule_kb,
     admin_services_kb, admin_dates_kb, admin_slots_kb, admin_manage_appt_kb,
     admin_reschedule_dates_kb, admin_reschedule_slots_kb, admin_reschedule_confirm_kb,
-    break_dates_kb, break_slots_kb, status_ru, RU_WEEKDAYS, cancel_breaks_kb,
+    break_dates_kb, break_slots_kb, break_repeat_kb, status_ru, RU_WEEKDAYS, cancel_breaks_kb,
     contacts_kb, admin_visit_confirm_kb,
 )
 from app.models import AppointmentStatus, BlockedInterval
@@ -76,6 +76,7 @@ K_BREAK_DATE = "break_date"
 K_BREAK_DURATION = "break_duration_min"
 K_BREAK_TIME_ERRORS = "break_time_errors"
 K_BREAK_REASON = "break_reason"
+K_BREAK_REPEAT = "break_repeat"
 
 ADDRESS_LINE = "Мусы Джалиля 30 к1, квартира 123"
 
@@ -177,9 +178,14 @@ def _clear_admin_visit(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("awaiting_admin_visit_price", None)
 
 def _clear_break(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for key in (K_BREAK_DATE, K_BREAK_DURATION, K_BREAK_TIME_ERRORS, K_BREAK_REASON):
+    for key in (K_BREAK_DATE, K_BREAK_DURATION, K_BREAK_TIME_ERRORS, K_BREAK_REASON, K_BREAK_REPEAT):
         context.user_data.pop(key, None)
-    for flag in ("awaiting_break_duration", "awaiting_break_reason", "awaiting_break_time"):
+    for flag in (
+        "awaiting_break_duration",
+        "awaiting_break_reason",
+        "awaiting_break_repeat",
+        "awaiting_break_time",
+    ):
         context.user_data.pop(flag, None)
 
 def _normalize_phone(value: str) -> str:
@@ -223,6 +229,8 @@ async def unified_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await handle_break_duration(update, context)
     if context.user_data.get("awaiting_break_reason"):
         return await handle_break_reason(update, context)
+    if context.user_data.get("awaiting_break_repeat"):
+        return await handle_break_repeat_text(update, context)
     if context.user_data.get("awaiting_break_time"):
         return await handle_break_time(update, context)
     if context.user_data.get("awaiting_admin_duration"):
@@ -513,6 +521,15 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("breaktime:"):
         slot_iso = data.split(":", 1)[1]
         return await admin_pick_break_time(update, context, slot_iso)
+
+    if data.startswith("breakrepeat:"):
+        repeat = data.split(":", 1)[1]
+        if repeat not in {"none", "daily", "weekly"}:
+            await query.message.reply_text("Не удалось распознать регулярность. Попробуй ещё раз.")
+            return
+        context.user_data[K_BREAK_REPEAT] = repeat
+        context.user_data["awaiting_break_repeat"] = False
+        return await _send_break_time_prompt(update, context)
 
     if data.startswith("breakcancel:"):
         block_id = int(data.split(":", 1)[1])
@@ -955,6 +972,40 @@ async def handle_break_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data[K_BREAK_REASON] = reason
     context.user_data["awaiting_break_reason"] = False
+    context.user_data["awaiting_break_repeat"] = True
+    await update.message.reply_text(
+        "Нужно ли повторять этот перерыв?",
+        reply_markup=break_repeat_kb(),
+    )
+
+async def handle_break_repeat_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_break_repeat"):
+        return
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        _clear_break(context)
+        return await update.message.reply_text("Нет доступа.")
+
+    text = (update.message.text or "").strip().lower()
+    mapping = {
+        "без": "none",
+        "без повторов": "none",
+        "нет": "none",
+        "не повторять": "none",
+        "каждый день": "daily",
+        "ежедневно": "daily",
+        "каждую неделю": "weekly",
+        "еженедельно": "weekly",
+    }
+    repeat = mapping.get(text)
+    if repeat is None:
+        return await update.message.reply_text(
+            "Выбери вариант регулярности кнопкой ниже.",
+            reply_markup=break_repeat_kb(),
+        )
+
+    context.user_data[K_BREAK_REPEAT] = repeat
+    context.user_data["awaiting_break_repeat"] = False
     await _send_break_time_prompt(update, context)
 
 async def admin_pick_time_from_slots(update: Update, context: ContextTypes.DEFAULT_TYPE, slot_iso: str):
@@ -1159,46 +1210,80 @@ async def handle_break_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await _finalize_break(update.message, context, start_local)
 
+def _break_repeat_starts(start_local: datetime, repeat: str) -> list[datetime]:
+    if repeat == "daily":
+        return [start_local + timedelta(days=offset) for offset in range(28)]
+    if repeat == "weekly":
+        return [start_local + timedelta(days=7 * offset) for offset in range(4)]
+    return [start_local]
+
+def _break_repeat_label(repeat: str) -> str:
+    if repeat == "daily":
+        return "каждый день (4 недели)"
+    if repeat == "weekly":
+        return "каждую неделю (4 недели)"
+    return "без повторов"
+
 async def _finalize_break(message, context: ContextTypes.DEFAULT_TYPE, start_local: datetime) -> None:
     cfg: Config = context.bot_data["cfg"]
     day_iso = context.user_data.get(K_BREAK_DATE)
     duration_min = int(context.user_data.get(K_BREAK_DURATION, 0))
     reason = (context.user_data.get(K_BREAK_REASON) or "Перерыв").strip() or "Перерыв"
+    repeat = (context.user_data.get(K_BREAK_REPEAT) or "none").strip().lower()
     if not day_iso or duration_min <= 0:
         _clear_break(context)
         await message.reply_text("Сессия сброшена. Начни заново.", reply_markup=admin_menu_kb())
         return
 
     session_factory = context.bot_data["session_factory"]
+    created = []
+    skipped = []
     async with session_factory() as s:
         async with s.begin():
             settings = await get_settings(s, cfg.timezone)
-            try:
-                await create_blocked_interval(
-                    s,
-                    settings,
-                    start_local,
-                    duration_min,
-                    created_by_admin=message.from_user.id if message.from_user else admin_ids(cfg)[0],
-                    reason=reason,
-                )
-            except ValueError as e:
-                code = str(e)
-                if code == "SLOT_TAKEN":
-                    await message.reply_text("Этот слот уже занят. Выбери другое время.")
-                    return
-                if code == "SLOT_BLOCKED":
-                    await message.reply_text("Этот слот уже заблокирован. Выбери другое время.")
-                    return
-                raise
+            for candidate_start in _break_repeat_starts(start_local, repeat):
+                try:
+                    await create_blocked_interval(
+                        s,
+                        settings,
+                        candidate_start,
+                        duration_min,
+                        created_by_admin=message.from_user.id if message.from_user else admin_ids(cfg)[0],
+                        reason=reason,
+                    )
+                    created.append(candidate_start)
+                except ValueError as e:
+                    code = str(e)
+                    if code in {"SLOT_TAKEN", "SLOT_BLOCKED"}:
+                        skipped.append(candidate_start)
+                        continue
+                    raise
 
     _clear_break(context)
-    end_local = start_local + timedelta(minutes=duration_min)
+    if not created:
+        await message.reply_text(
+            "Не удалось добавить перерыв: выбранные слоты заняты или заблокированы.",
+            reply_markup=admin_menu_kb(),
+        )
+        return
+
+    end_local = created[0] + timedelta(minutes=duration_min)
+    summary_lines = [
+        "Перерыв добавлен ✅",
+        f"Название: {reason}",
+        f"Дата: {created[0].strftime('%d.%m')}",
+        f"Время: {created[0].strftime('%H:%M')}–{end_local.strftime('%H:%M')}",
+        f"Повтор: {_break_repeat_label(repeat)}",
+        f"Создано: {len(created)}",
+    ]
+    if skipped:
+        skipped_dates = ", ".join(dt.strftime("%d.%m") for dt in skipped[:8])
+        if len(skipped) > 8:
+            skipped_dates += "…"
+        summary_lines.append(f"Пропущено (занято/блок): {skipped_dates}")
+
     await message.reply_text(
-        f"Перерыв добавлен ✅\n"
-        f"Название: {reason}\n"
-        f"Дата: {start_local.strftime('%d.%m')}\n"
-        f"Время: {start_local.strftime('%H:%M')}–{end_local.strftime('%H:%M')}",
+        "\n".join(summary_lines),
         reply_markup=admin_menu_kb(),
     )
 
@@ -2769,32 +2854,58 @@ async def admin_booked_month_view(update: Update, context: ContextTypes.DEFAULT_
         settings = await get_settings(s, cfg.timezone)
         now_local = datetime.now(tz=settings.tz)
         end_local = now_local + timedelta(days=30)
-        appts = await admin_list_booked_range(
+        appts = await admin_list_appointments_range(
             s,
             now_local.astimezone(pytz.UTC),
             end_local.astimezone(pytz.UTC),
         )
 
+    lines = ["🗓 Все записи на месяц вперёд:"]
     if not appts:
-        return await update.message.reply_text(
-            "На ближайший месяц подтверждённых записей нет.",
-            reply_markup=admin_menu_kb()
-        )
-
-    lines = ["🗓 Все подтверждённые записи на месяц вперёд:"]
-    for a in appts:
-        local_dt = a.start_dt.astimezone(settings.tz)
-        end_dt = a.end_dt.astimezone(settings.tz)
-        day_label = f"{local_dt.strftime('%d.%m')} ({RU_WEEKDAYS[local_dt.weekday()]})"
-        client = a.client.full_name or (f"@{a.client.username}" if a.client.username else str(a.client.tg_id))
-        phone = a.client.phone or "—"
-        price = format_price(a.price_override if a.price_override is not None else a.service.price)
-        service_label = appointment_services_label(a)
-        lines.append(
-            f"• {day_label} {local_dt.strftime('%H:%M')}–{end_dt.strftime('%H:%M')} | {service_label} | {price} | {client} | {phone}"
-        )
+        lines.append("• Записей нет.")
+    else:
+        for a in appts:
+            local_dt = a.start_dt.astimezone(settings.tz)
+            end_dt = a.end_dt.astimezone(settings.tz)
+            day_label = f"{local_dt.strftime('%d.%m')} ({RU_WEEKDAYS[local_dt.weekday()]})"
+            client = a.client.full_name or (f"@{a.client.username}" if a.client.username else str(a.client.tg_id))
+            phone = a.client.phone or "—"
+            price = format_price(a.price_override if a.price_override is not None else a.service.price)
+            service_label = appointment_services_label(a)
+            status_label = status_ru(a.status.value)
+            lines.append(
+                f"• {day_label} {local_dt.strftime('%H:%M')}–{end_dt.strftime('%H:%M')} | "
+                f"{status_label} | {service_label} | {price} | {client} | {phone}"
+            )
 
     await update.message.reply_text("\n".join(lines), reply_markup=admin_menu_kb())
+
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        start_day = datetime.now(tz=settings.tz).date()
+        for week_index in range(4):
+            week_start = start_day + timedelta(days=7 * week_index)
+            week_start_local = settings.tz.localize(datetime.combine(week_start, datetime.min.time()))
+            week_end_local = week_start_local + timedelta(days=7)
+            appts = await admin_list_appointments_range(
+                s,
+                week_start_local.astimezone(pytz.UTC),
+                week_end_local.astimezone(pytz.UTC),
+            )
+            breaks = await list_future_breaks(
+                s,
+                week_start_local.astimezone(pytz.UTC),
+                week_end_local.astimezone(pytz.UTC),
+            )
+            week_image = _build_week_schedule_image(week_start, settings, appts, breaks)
+            week_end = week_start + timedelta(days=6)
+            caption = f"📆 Неделя {week_index + 1} • {week_start.strftime('%d.%m')}–{week_end.strftime('%d.%m')}"
+            await update.message.reply_photo(
+                photo=week_image,
+                caption=caption,
+                reply_markup=admin_menu_kb(),
+            )
 
 async def admin_cancel_break_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
