@@ -330,6 +330,46 @@ async def create_hold_appointment(
     await session.flush()
     return appt
 
+async def create_hold_appointment_with_duration(
+    session: AsyncSession,
+    settings: SettingsView,
+    client: User,
+    service: Service,
+    start_local: datetime,
+    *,
+    duration_min: int,
+    comment: str | None,
+    price_override: float | None = None,
+    admin_comment: str | None = None,
+) -> Appointment:
+    now_utc = datetime.now(tz=pytz.UTC)
+    start_utc = _to_utc(start_local, settings.tz)
+    end_local = compute_slot_end_for_duration(start_local, duration_min, service, settings)
+    end_utc = _to_utc(end_local, settings.tz)
+
+    await _ensure_slot_available(session, start_utc, end_utc, service.id)
+
+    appt = Appointment(
+        client_user_id=client.id,
+        service_id=service.id,
+        start_dt=start_utc,
+        end_dt=end_utc,
+        status=AppointmentStatus.Hold,
+        hold_expires_at=now_utc + timedelta(minutes=settings.hold_ttl_min),
+        client_comment=comment,
+        admin_comment=admin_comment,
+        price_override=price_override,
+        proposed_alt_start_dt=None,
+        reminder_24h_sent=False,
+        reminder_2h_sent=False,
+        visit_confirmed=False,
+        created_at=now_utc,
+        updated_at=now_utc,
+    )
+    session.add(appt)
+    await session.flush()
+    return appt
+
 async def create_admin_appointment(
     session: AsyncSession,
     settings: SettingsView,

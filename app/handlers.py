@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, date, timedelta, time
+from decimal import Decimal
 from io import BytesIO
 from urllib.parse import quote
 import asyncio
@@ -15,7 +16,7 @@ from app.config import Config
 from app.logic import (
     get_settings, upsert_user, set_user_phone, list_active_services, list_available_dates,
     list_available_slots_for_service, list_available_slots_for_duration,
-    create_hold_appointment, get_user_appointments,
+    create_hold_appointment, create_hold_appointment_with_duration, get_user_appointments,
     get_user_appointments_history, get_appointment, admin_confirm, admin_reject,
     cancel_by_client, request_reschedule, confirm_reschedule, reject_reschedule,
     admin_list_appointments_for_day, admin_list_holds, create_admin_appointment,
@@ -26,7 +27,7 @@ from app.logic import (
     delete_blocked_interval, SettingsView
 )
 from app.keyboards import (
-    main_menu_kb, phone_request_kb, services_kb, dates_kb, slots_kb, confirm_request_kb,
+    main_menu_kb, phone_request_kb, services_multi_kb, dates_kb, slots_kb, confirm_request_kb,
     admin_request_kb, my_appts_kb, my_appt_actions_kb, admin_menu_kb,
     reschedule_dates_kb, reschedule_slots_kb, reschedule_confirm_kb, admin_reschedule_kb,
     admin_services_kb, admin_dates_kb, admin_slots_kb, admin_manage_appt_kb,
@@ -46,6 +47,7 @@ from texts import (
 logger = logging.getLogger(__name__)
 
 K_SVC = "svc_id"
+K_SVCS = "svc_ids"
 K_DATE = "date"
 K_SLOT = "slot_iso"
 K_COMMENT = "comment"
@@ -72,6 +74,29 @@ K_BREAK_DURATION = "break_duration_min"
 K_BREAK_TIME_ERRORS = "break_time_errors"
 
 ADDRESS_LINE = "Мусы Джалиля 30 к1, квартира 123"
+
+def _selected_service_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
+    raw = context.user_data.get(K_SVCS) or []
+    return [int(x) for x in raw if isinstance(x, int) or (isinstance(x, str) and x.isdigit())]
+
+def _collect_selected_services(services: list, selected_ids: list[int]) -> list:
+    if not selected_ids:
+        return []
+    selected_set = set(selected_ids)
+    return [s for s in services if s.id in selected_set]
+
+def _slot_duration_for_services(services: list, base_service) -> int:
+    duration_sum = sum(int(s.duration_min) for s in services)
+    buffer_sum = sum(int(s.buffer_min) for s in services)
+    return duration_sum + buffer_sum - int(base_service.buffer_min)
+
+def _display_duration_for_services(services: list) -> int:
+    duration_sum = sum(int(s.duration_min) for s in services)
+    buffer_sum = sum(int(s.buffer_min) for s in services)
+    return duration_sum + buffer_sum
+
+def _services_label(services: list) -> str:
+    return ", ".join(s.name for s in services)
 
 def admin_ids(cfg: Config) -> tuple[int, ...]:
     ids = getattr(cfg, "admin_telegram_ids", None)
@@ -311,13 +336,18 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отправлено ✅ Мастер ответит вам в Telegram.", reply_markup=main_menu_for(update, context))
 
 async def flow_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(K_SVC, None)
+    context.user_data.pop(K_SVCS, None)
     session_factory = context.bot_data["session_factory"]
     async with session_factory() as s:
         services = await list_active_services(s)
     if not services:
         await update.message.reply_text("Услуги пока не настроены. Напишите мастеру.", reply_markup=main_menu_for(update, context))
         return
-    await update.message.reply_text("Выбери услугу:", reply_markup=services_kb(services))
+    await update.message.reply_text(
+        "Выбери одну или несколько услуг, затем нажми «Далее»:",
+        reply_markup=services_multi_kb(services, set()),
+    )
 
 async def admin_start_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]
@@ -347,8 +377,53 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data or ""
 
+    if data.startswith("svcsel:"):
+        svc_id = int(data.split(":")[1])
+        selected = _selected_service_ids(context)
+        if svc_id in selected:
+            selected = [x for x in selected if x != svc_id]
+        else:
+            selected.append(svc_id)
+        context.user_data[K_SVCS] = selected
+
+        session_factory = context.bot_data["session_factory"]
+        async with session_factory() as s:
+            services = await list_active_services(s)
+        await query.message.edit_text(
+            "Выбери одну или несколько услуг, затем нажми «Далее»:",
+            reply_markup=services_multi_kb(services, set(selected)),
+        )
+        return
+
+    if data == "svcclear":
+        context.user_data.pop(K_SVCS, None)
+        session_factory = context.bot_data["session_factory"]
+        async with session_factory() as s:
+            services = await list_active_services(s)
+        await query.message.edit_text(
+            "Выбери одну или несколько услуг, затем нажми «Далее»:",
+            reply_markup=services_multi_kb(services, set()),
+        )
+        return
+
+    if data == "svcnext":
+        selected = _selected_service_ids(context)
+        if not selected:
+            await query.message.edit_text("Выбери хотя бы одну услугу.")
+            return
+        session_factory = context.bot_data["session_factory"]
+        async with session_factory() as s:
+            services = await list_active_services(s)
+        selected_services = _collect_selected_services(services, selected)
+        if not selected_services:
+            await query.message.edit_text("Выбери хотя бы одну услугу.")
+            return
+        context.user_data[K_SVC] = selected_services[0].id
+        return await flow_dates(update, context)
+
     if data.startswith("svc:"):
         context.user_data[K_SVC] = int(data.split(":")[1])
+        context.user_data[K_SVCS] = [context.user_data[K_SVC]]
         return await flow_dates(update, context)
 
     if data.startswith("admsvc:"):
@@ -505,7 +580,11 @@ async def flow_services_from_callback(update: Update, context: ContextTypes.DEFA
     session_factory = context.bot_data["session_factory"]
     async with session_factory() as s:
         services = await list_active_services(s)
-    await msg.edit_text("Выбери услугу:", reply_markup=services_kb(services))
+    selected = set(_selected_service_ids(context))
+    await msg.edit_text(
+        "Выбери одну или несколько услуг, затем нажми «Далее»:",
+        reply_markup=services_multi_kb(services, selected),
+    )
 
 async def flow_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_factory = context.bot_data["session_factory"]
@@ -629,7 +708,12 @@ async def flow_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         service = next((x for x in services if x.id == svc_id), None)
         if not service:
             return await update.callback_query.message.edit_text("Услуга недоступна.")
-        slots = await list_available_slots_for_service(s, settings, service, day)
+        selected_services = _collect_selected_services(services, _selected_service_ids(context))
+        if len(selected_services) > 1:
+            duration_min = _slot_duration_for_services(selected_services, service)
+            slots = await list_available_slots_for_duration(s, settings, service, day, duration_min)
+        else:
+            slots = await list_available_slots_for_service(s, settings, service, day)
 
     if not slots:
         return await update.callback_query.message.edit_text("На эту дату нет свободных слотов. Выбери другую дату.")
@@ -746,12 +830,18 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await s.commit()
 
     context.user_data["awaiting_phone"] = False
-    price_label = format_price(service.price)
+    selected_services = _collect_selected_services(services, _selected_service_ids(context))
+    if not selected_services:
+        selected_services = [service]
+    total_price = sum(Decimal(str(s.price)) for s in selected_services)
+    duration_min = _display_duration_for_services(selected_services)
+    price_label = format_price(total_price)
     local_dt = start_local.astimezone(settings.tz) if start_local.tzinfo else settings.tz.localize(start_local)
     await msg.reply_text(
         "Проверь, всё ли верно перед отправкой заявки:\n"
-        f"Услуга: {service.name}\n"
+        f"Услуги: {_services_label(selected_services)}\n"
         f"Дата/время: {local_dt.strftime('%d.%m %H:%M')}\n"
+        f"Длительность: {int(duration_min)} мин (+буфер)\n"
         f"Цена: {price_label}",
         reply_markup=confirm_request_kb(),
     )
@@ -1222,7 +1312,34 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not service:
                 return await update.callback_query.message.edit_text("Услуга недоступна.")
             try:
-                appt = await create_hold_appointment(s, settings, client, service, start_local, context.user_data.get(K_COMMENT))
+                selected_services = _collect_selected_services(services, _selected_service_ids(context))
+                if not selected_services:
+                    selected_services = [service]
+                if len(selected_services) > 1:
+                    duration_min = _slot_duration_for_services(selected_services, service)
+                    total_price = sum(Decimal(str(s.price)) for s in selected_services)
+                    comment = context.user_data.get(K_COMMENT)
+                    admin_comment = f"Услуги: {_services_label(selected_services)}"
+                    appt = await create_hold_appointment_with_duration(
+                        s,
+                        settings,
+                        client,
+                        service,
+                        start_local,
+                        comment=comment,
+                        duration_min=duration_min,
+                        price_override=total_price,
+                        admin_comment=admin_comment,
+                    )
+                else:
+                    appt = await create_hold_appointment(
+                        s,
+                        settings,
+                        client,
+                        service,
+                        start_local,
+                        context.user_data.get(K_COMMENT),
+                    )
             except ValueError as e:
                 code = str(e)
                 if code == "SLOT_TAKEN":
@@ -1231,15 +1348,20 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return await update.callback_query.message.edit_text("Этот слот заблокирован. Выбери другое время.")
                 raise
 
+            selected_services = _collect_selected_services(services, _selected_service_ids(context))
+            if not selected_services:
+                selected_services = [service]
+            duration_label = _display_duration_for_services(selected_services)
+            total_price = sum(Decimal(str(s.price)) for s in selected_services)
             await notify_admins(
                 context,
                 cfg,
                 text=(
                     f"🆕 Новая заявка (HOLD #{appt.id})\n"
-                    f"Услуга: {service.name}\n"
+                    f"Услуги: {_services_label(selected_services)}\n"
                     f"Дата/время: {appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')}\n"
-                    f"Длительность: {int(service.duration_min)} мин (+буфер)\n"
-                    f"Цена: {format_price(service.price)}\n\n"
+                    f"Длительность: {int(duration_label)} мин (+буфер)\n"
+                    f"Цена: {format_price(total_price)}\n\n"
                     f"Клиент: {update.effective_user.full_name} (@{update.effective_user.username})\n"
                     f"Телефон: {client.phone or '—'}\n"
                     f"Комментарий: {context.user_data.get(K_COMMENT) or '—'}\n\n"
@@ -1248,7 +1370,7 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=admin_request_kb(appt.id),
             )
 
-    for k in (K_SVC, K_DATE, K_SLOT, K_COMMENT, K_PHONE):
+    for k in (K_SVC, K_SVCS, K_DATE, K_SLOT, K_COMMENT, K_PHONE):
         context.user_data.pop(k, None)
 
     await update.callback_query.message.edit_text(
