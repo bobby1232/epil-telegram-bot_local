@@ -35,6 +35,7 @@ def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     kb = [
         ["📅 Записи сегодня", "📅 Записи завтра"],
+        ["📆 Записи недели"],
         ["🧾 Все заявки (Ожидание)", "🗓 Все заявки"],
         ["📝 Записать клиента"],
         ["⏸ Перерыв", "🗑 Отменить перерыв"],

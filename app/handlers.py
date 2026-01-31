@@ -23,8 +23,8 @@ from app.logic import (
     create_admin_appointment_with_duration, check_slot_available,
     check_slot_available_for_duration, compute_slot_end, compute_slot_end_for_duration,
     admin_cancel_appointment, list_available_break_slots, create_blocked_interval,
-    admin_reschedule_appointment, admin_list_booked_range, list_future_breaks,
-    delete_blocked_interval, SettingsView
+    admin_reschedule_appointment, admin_list_booked_range, admin_list_appointments_range,
+    list_future_breaks, delete_blocked_interval, SettingsView
 )
 from app.keyboards import (
     main_menu_kb, phone_request_kb, services_multi_kb, dates_kb, slots_kb, confirm_request_kb,
@@ -271,6 +271,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await admin_day_view(update, context, offset_days=0)
         if txt == "📅 Записи завтра":
             return await admin_day_view(update, context, offset_days=1)
+        if txt == "📆 Записи недели":
+            return await admin_week_view(update, context)
         if txt == "🧾 Все заявки (Ожидание)":
             return await admin_holds_view(update, context)
         if txt == "🗓 Все заявки":
@@ -2215,6 +2217,149 @@ def _build_day_timeline_image(
     buffer.seek(0)
     return buffer
 
+def _wrap_text_lines(
+    text: str,
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        width = draw.textbbox((0, 0), candidate, font=font)[2]
+        if width <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+def _build_week_schedule_image(
+    start_day: date,
+    settings: SettingsView,
+    appts: list,
+) -> BytesIO:
+    days = [start_day + timedelta(days=offset) for offset in range(7)]
+    work_start_minutes = settings.work_start.hour * 60 + settings.work_start.minute
+    work_end_minutes = settings.work_end.hour * 60 + settings.work_end.minute
+    total_minutes = max(work_end_minutes - work_start_minutes, 60)
+
+    title_font = _pick_font(26)
+    header_font = _pick_font(18)
+    time_font = _pick_font(18)
+    appt_font = _pick_font(16)
+
+    padding = 24
+    header_height = 42
+    hour_height = 80
+    minute_height = hour_height / 60
+
+    dummy_img = Image.new("RGB", (10, 10))
+    draw = ImageDraw.Draw(dummy_img)
+    time_col_width = draw.textbbox((0, 0), "00:00", font=time_font)[2] + 10
+
+    day_labels = [f"{RU_WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}" for d in days]
+    header_widths = [draw.textbbox((0, 0), label, font=header_font)[2] for label in day_labels]
+    day_col_width = max(140, max(header_widths, default=120) + 16)
+
+    grid_left = padding + time_col_width + 12
+    grid_top = padding + header_height
+    grid_width = day_col_width * 7
+    grid_height = int(total_minutes * minute_height)
+
+    title_text = f"Записи на неделю • {start_day.strftime('%d.%m')}–{days[-1].strftime('%d.%m')}"
+    title_height = draw.textbbox((0, 0), title_text, font=title_font)[3]
+
+    width = grid_left + grid_width + padding
+    height = grid_top + grid_height + padding + title_height
+    img = Image.new("RGB", (width, height), (248, 248, 248))
+    draw = ImageDraw.Draw(img)
+
+    title_y = padding
+    draw.text((padding, title_y), title_text, font=title_font, fill=(40, 40, 40))
+
+    header_y = title_y + title_height + 12
+    for idx, label in enumerate(day_labels):
+        x = grid_left + idx * day_col_width + day_col_width / 2
+        label_width = draw.textbbox((0, 0), label, font=header_font)[2]
+        draw.text((x - label_width / 2, header_y), label, font=header_font, fill=(60, 60, 60))
+
+    grid_top = header_y + header_height - 6
+
+    for day_idx in range(8):
+        x = grid_left + day_idx * day_col_width
+        draw.line((x, grid_top, x, grid_top + grid_height), fill=(190, 190, 190), width=1)
+
+    for minute_offset in range(0, total_minutes + 1, 60):
+        y = grid_top + minute_offset * minute_height
+        draw.line((grid_left, y, grid_left + grid_width, y), fill=(200, 200, 200), width=1)
+        time_minutes = work_start_minutes + minute_offset
+        hour = time_minutes // 60
+        minute = time_minutes % 60
+        label = f"{hour:02d}:{minute:02d}"
+        label_width = draw.textbbox((0, 0), label, font=time_font)[2]
+        draw.text(
+            (grid_left - 12 - label_width, y - 10),
+            label,
+            font=time_font,
+            fill=(110, 110, 110),
+        )
+
+    def appt_colors(status: AppointmentStatus) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        if status == AppointmentStatus.Booked:
+            return (248, 209, 223), (196, 85, 128)
+        return (240, 224, 176), (191, 162, 88)
+
+    line_height = draw.textbbox((0, 0), "Ag", font=appt_font)[3] + 2
+
+    for appt in appts:
+        local_start = appt.start_dt.astimezone(settings.tz)
+        local_end = appt.end_dt.astimezone(settings.tz)
+        day_offset = (local_start.date() - start_day).days
+        if day_offset < 0 or day_offset >= 7:
+            continue
+        start_min = local_start.hour * 60 + local_start.minute - work_start_minutes
+        end_min = local_end.hour * 60 + local_end.minute - work_start_minutes
+        if end_min <= 0 or start_min >= total_minutes:
+            continue
+        start_min = max(start_min, 0)
+        end_min = min(end_min, total_minutes)
+
+        x0 = grid_left + day_offset * day_col_width + 6
+        x1 = x0 + day_col_width - 12
+        y0 = grid_top + start_min * minute_height + 2
+        y1 = grid_top + end_min * minute_height - 2
+        if y1 - y0 < 18:
+            y1 = y0 + 18
+
+        fill, outline = appt_colors(appt.status)
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=6, fill=fill, outline=outline, width=2)
+
+        client_label = appt.client.full_name or (f"@{appt.client.username}" if appt.client.username else str(appt.client.tg_id))
+        service_label = appointment_services_label(appt)
+        text_lines = _wrap_text_lines(client_label, draw, appt_font, int(x1 - x0 - 10))
+        if service_label:
+            text_lines += _wrap_text_lines(service_label, draw, appt_font, int(x1 - x0 - 10))
+        max_lines = max(int((y1 - y0 - 8) / line_height), 0)
+        if max_lines:
+            text_lines = text_lines[:max_lines]
+            text_y = y0 + 4
+            for line in text_lines:
+                draw.text((x0 + 6, text_y), line, font=appt_font, fill=(60, 60, 60))
+                text_y += line_height
+
+    buffer = BytesIO()
+    buffer.name = "week_schedule.png"
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
 async def admin_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE, offset_days: int):
     cfg: Config = context.bot_data["cfg"]
     if not is_admin(cfg, update.effective_user.id):
@@ -2270,6 +2415,30 @@ async def admin_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE, off
                 f"Запись • {start_t} • {appointment_services_label(a)}",
                 reply_markup=admin_manage_appt_kb(a.id, allow_reschedule=_is_admin_created(a)),
             )
+
+async def admin_week_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
+    if not is_admin(cfg, update.effective_user.id):
+        return await update.message.reply_text("Нет доступа.")
+
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        start_day = datetime.now(tz=settings.tz).date()
+        start_local = settings.tz.localize(datetime.combine(start_day, datetime.min.time()))
+        end_local = start_local + timedelta(days=7)
+        appts = await admin_list_appointments_range(
+            s,
+            start_local.astimezone(pytz.UTC),
+            end_local.astimezone(pytz.UTC),
+        )
+
+    week_image = _build_week_schedule_image(start_day, settings, appts)
+    await update.message.reply_photo(
+        photo=week_image,
+        caption="📆 Записи на неделю",
+        reply_markup=admin_menu_kb(),
+    )
 
 async def admin_booked_month_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg: Config = context.bot_data["cfg"]

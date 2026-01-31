@@ -768,6 +768,24 @@ async def admin_list_booked_range(
         .order_by(Appointment.start_dt.asc())
     )).scalars().all()
 
+async def admin_list_appointments_range(
+    session: AsyncSession,
+    start_utc: datetime,
+    end_utc: datetime,
+) -> list[Appointment]:
+    return (await session.execute(
+        select(Appointment)
+        .options(selectinload(Appointment.client), selectinload(Appointment.service))
+        .where(
+            and_(
+                Appointment.start_dt >= start_utc,
+                Appointment.start_dt < end_utc,
+                Appointment.status.in_([AppointmentStatus.Booked, AppointmentStatus.Hold]),
+            )
+        )
+        .order_by(Appointment.start_dt.asc())
+    )).scalars().all()
+
 async def list_future_breaks(
     session: AsyncSession,
     start_utc: datetime,
