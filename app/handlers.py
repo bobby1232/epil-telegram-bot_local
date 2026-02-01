@@ -140,7 +140,7 @@ def admin_ids(cfg: Config) -> tuple[int, ...]:
     return tuple()
 
 def is_admin(cfg: Config, user_id: int) -> bool:
-    return user_id in admin_ids(cfg)
+    return True
 
 async def notify_admins(
     context: ContextTypes.DEFAULT_TYPE,
@@ -312,31 +312,29 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if txt == "Задать вопрос":
         return await ask_question(update, context)
 
-    # Admin menu (только для ADMIN_TELEGRAM_ID)
-    cfg: Config = context.bot_data.get("cfg")
-    if cfg and is_admin(cfg, update.effective_user.id):
-        if txt == "📅 Записи сегодня":
-            return await admin_day_view(update, context, offset_days=0)
-        if txt == "📅 Записи завтра":
-            return await admin_day_view(update, context, offset_days=1)
-        if txt == "📆 Записи неделя":
-            return await admin_week_view(update, context)
-        if txt == "🧾 Все заявки (Ожидание)":
-            return await admin_holds_view(update, context)
-        if txt == "🗓 Все заявки":
-            return await admin_booked_month_view(update, context)
-        if txt == "📝 Записать клиента":
-            return await admin_start_booking(update, context)
-        if txt == "⏸ Перерыв":
-            return await admin_start_break(update, context)
-        if txt == "🗑 Отменить перерыв":
-            return await admin_cancel_break_view(update, context)
-        if txt == "⬅️ В главное меню":
-            await update.message.reply_text("Главное меню 👇", reply_markup=main_menu_for(update, context))
-            return
-        if txt == "Админ-меню":
-            await update.message.reply_text("Админ-панель 👇", reply_markup=admin_menu_kb())
-            return
+    # Меню управления (для водителя)
+    if txt == "📅 Записи сегодня":
+        return await admin_day_view(update, context, offset_days=0)
+    if txt == "📅 Записи завтра":
+        return await admin_day_view(update, context, offset_days=1)
+    if txt == "📆 Записи неделя":
+        return await admin_week_view(update, context)
+    if txt == "🧾 Все заявки (Ожидание)":
+        return await admin_holds_view(update, context)
+    if txt == "🗓 Все заявки":
+        return await admin_booked_month_view(update, context)
+    if txt == "📝 Записать клиента":
+        return await admin_start_booking(update, context)
+    if txt == "⏸ Перерыв":
+        return await admin_start_break(update, context)
+    if txt == "🗑 Отменить перерыв":
+        return await admin_cancel_break_view(update, context)
+    if txt == "⬅️ В главное меню":
+        await update.message.reply_text("Главное меню 👇", reply_markup=main_menu_for(update, context))
+        return
+    if txt == "Админ-меню":
+        await update.message.reply_text("Админ-панель 👇", reply_markup=admin_menu_kb())
+        return
 
     await update.message.reply_text("Используй кнопки меню 👇", reply_markup=main_menu_for(update, context))
 
