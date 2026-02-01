@@ -34,7 +34,7 @@ from app.keyboards import (
     admin_services_kb, admin_dates_kb, admin_slots_kb, admin_manage_appt_kb,
     admin_reschedule_dates_kb, admin_reschedule_slots_kb, admin_reschedule_confirm_kb,
     break_dates_kb, break_slots_kb, break_repeat_kb, status_ru, RU_WEEKDAYS, cancel_breaks_kb,
-    contacts_kb, admin_visit_confirm_kb,
+    contacts_kb, admin_visit_confirm_kb, client_confirmed_kb,
 )
 from app.models import AppointmentStatus, BlockedInterval
 from app.schedule_style import DAY_TIMELINE_STYLE, WEEK_SCHEDULE_STYLE
@@ -79,6 +79,7 @@ K_BREAK_TIME_ERRORS = "break_time_errors"
 K_BREAK_REASON = "break_reason"
 K_BREAK_REPEAT = "break_repeat"
 K_BREAK_CANCEL_IDS = "break_cancel_ids"
+K_CLIENT_MSG_APPT = "client_msg_appt_id"
 
 ADDRESS_LINE = "Мусы Джалиля 30 к1, квартира 123"
 
@@ -282,6 +283,8 @@ async def unified_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await handle_admin_confirm_price(update, context)
     if context.user_data.get("awaiting_admin_visit_price"):
         return await handle_admin_visit_price(update, context)
+    if context.user_data.get("awaiting_client_msg"):
+        return await handle_client_message(update, context)
     if context.user_data.get("awaiting_question"):
         return await handle_question(update, context)
     if context.user_data.get("awaiting_comment"):
@@ -395,6 +398,47 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
     )
     await update.message.reply_text("Отправлено ✅ Мастер ответит вам в Telegram.", reply_markup=main_menu_for(update, context))
+
+async def start_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
+    cfg: Config = context.bot_data["cfg"]
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        appt = await get_appointment(s, appt_id)
+    if appt.client.tg_id != update.effective_user.id:
+        return await update.callback_query.message.edit_text("Нет доступа.")
+    context.user_data["awaiting_client_msg"] = True
+    context.user_data[K_CLIENT_MSG_APPT] = appt_id
+    await update.callback_query.message.edit_text("Напиши сообщение водителю одним сообщением — я перешлю.")
+
+async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cfg: Config = context.bot_data["cfg"]
+    if not context.user_data.get("awaiting_client_msg"):
+        return
+    context.user_data["awaiting_client_msg"] = False
+    appt_id = context.user_data.pop(K_CLIENT_MSG_APPT, None)
+    if not appt_id:
+        return await update.message.reply_text("Не удалось определить запись.", reply_markup=main_menu_for(update, context))
+    msg = (update.message.text or "").strip()
+    session_factory = context.bot_data["session_factory"]
+    async with session_factory() as s:
+        settings = await get_settings(s, cfg.timezone)
+        appt = await get_appointment(s, appt_id)
+    if appt.client.tg_id != update.effective_user.id:
+        return await update.message.reply_text("Нет доступа.", reply_markup=main_menu_for(update, context))
+    await notify_admins(
+        context,
+        cfg,
+        text=(
+            "💬 Сообщение от клиента по записи\n"
+            f"#{appt.id}\n"
+            f"Услуга: {appointment_services_label(appt)}\n"
+            f"Дата/время: {appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')}\n"
+            f"Клиент: {appt.client.full_name or appt.client.tg_id}\n"
+            f"Телефон: {appt.client.phone or '—'}\n\n"
+            f"{msg}"
+        ),
+    )
+    await update.message.reply_text("Сообщение отправлено ✅", reply_markup=main_menu_for(update, context))
 
 async def flow_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(K_SVC, None)
@@ -651,6 +695,10 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("my:"):
         appt_id = int(data.split(":")[1])
         return await show_my_appointment_detail(update, context, appt_id)
+
+    if data.startswith("clientmsg:"):
+        appt_id = int(data.split(":")[1])
+        return await start_client_message(update, context, appt_id)
 
     if data.startswith("mycancel:"):
         appt_id = int(data.split(":")[1])
@@ -1584,6 +1632,7 @@ async def handle_admin_confirm_price(update: Update, context: ContextTypes.DEFAU
                     f"Цена: {price_label}\n"
                     f"Адриана ждет Вас!\n\n"
                 ),
+                reply_markup=client_confirmed_kb(appt.id),
             )
             await asyncio.sleep(5)
             for part in PRECARE_RECOMMENDATIONS_PARTS:
