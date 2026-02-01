@@ -74,5 +74,5 @@ def load_config() -> Config:
         cancel_limit_hours=_get_int("CANCEL_LIMIT_HOURS", 2),
         work_start=os.getenv("WORK_START", "09:00").strip(),
         work_end=os.getenv("WORK_END", "20:45").strip(),
-        work_days=os.getenv("WORK_DAYS", "0,1,2,3,4,5").strip(),  # 0=Mon
+        work_days=os.getenv("WORK_DAYS", "0,1,2,3,4,5,6").strip(),  # 0=Mon
     )
