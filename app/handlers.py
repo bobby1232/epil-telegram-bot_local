@@ -1588,12 +1588,11 @@ async def handle_admin_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await context.bot.send_message(
                 chat_id=client_tg_id,
                 text=(
-                    "✅ Бронь подтверждена!\n"
+                    "✅ Мастер записал вас на услугу.\n"
                     f"{local_dt.strftime('%d.%m %H:%M')}\n"
                     f"Услуга: {service.name}\n"
                     f"Цена: {price_label}"
-                ),
-                reply_markup=client_confirmed_kb(appt.id),
+                )
             )
         except Exception:
             pass
@@ -1642,7 +1641,7 @@ async def handle_admin_confirm_price(update: Update, context: ContextTypes.DEFAU
             await context.bot.send_message(
                 chat_id=appt.client.tg_id,
                 text=(
-                    f"✅ Бронь подтверждена!\n"
+                    f"✅ Запись подтверждена!\n"
                     f"{appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')}\n"
                     f"Услуга: {appointment_services_label(appt)}\n"
                     f"Цена: {price_label}\n"
@@ -1873,31 +1872,14 @@ async def client_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, appt
                 return await update.callback_query.message.edit_text(
                     f"Отмена недоступна менее чем за {settings.cancel_limit_hours} часов. Напишите мастеру напрямую."
                 )
-            cancel_dt = appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')
-            client_name = appt.client.full_name or appt.client.tg_id
-            admin_message = (
-                "🚫 Пассажир отменил бронь.\n"
-                f"#{appt.id}\n"
-                f"Дата/время: {cancel_dt}\n"
-                f"Услуга: {appointment_services_label(appt)}\n"
-                f"Пассажир: {client_name}\n"
-                f"Телефон: {appt.client.phone or '—'}\n"
-                "Освободилось 1 место ✅"
-            )
             await notify_admins(
                 context,
                 cfg,
-                text=admin_message,
+                text=(
+                    "🚫 Клиент отменил запись "
+                    f"#{appt.id} на {appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')}"
+                ),
             )
-            chat = update.effective_chat
-            if chat and getattr(chat, "type", None) in {"group", "supergroup"}:
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat.id,
-                        text=admin_message,
-                    )
-                except Exception:
-                    logger.exception("Failed to notify chat %s about cancellation", chat.id)
     await update.callback_query.message.edit_text("Запись отменена ✅")
 
 async def start_reschedule(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
