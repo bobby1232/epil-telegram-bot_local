@@ -311,6 +311,15 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_aftercare(update, context)
     if txt == "Задать вопрос":
         return await ask_question(update, context)
+    if txt == "Пассажир":
+        await update.message.reply_text("Меню пассажира 👇", reply_markup=main_menu_for(update, context))
+        return
+    if txt == "Водитель":
+        if is_admin(context.bot_data["cfg"], update.effective_user.id):
+            await update.message.reply_text("Меню водителя 👇", reply_markup=admin_menu_kb())
+        else:
+            await update.message.reply_text("Доступно только для водителей.", reply_markup=main_menu_for(update, context))
+        return
 
     # Меню управления (для водителя)
     if txt == "📅 Записи сегодня":
