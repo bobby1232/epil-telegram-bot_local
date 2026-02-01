@@ -177,7 +177,7 @@ def client_confirmed_kb(appt_id: int) -> InlineKeyboardMarkup:
 def admin_manage_appt_kb(appt_id: int, *, allow_reschedule: bool = True) -> InlineKeyboardMarkup:
     rows = []
     if allow_reschedule:
-        rows.append([InlineKeyboardButton("🔄 Перенести", callback_data=f"admresched:start:{appt_id}")])
+        rows.append([InlineKeyboardButton("🔄 Перенести (согласовать)", callback_data=f"admresched:start:{appt_id}")])
     rows.append([InlineKeyboardButton("🚫 Отменить", callback_data=f"adm:cancel:{appt_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -259,6 +259,12 @@ def admin_reschedule_confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Подтвердить перенос", callback_data="admresched:send")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="admresched:back:dates")],
+    ])
+
+def client_reschedule_request_kb(appt_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Согласиться", callback_data=f"cresc:accept:{appt_id}")],
+        [InlineKeyboardButton("❌ Не подходит", callback_data=f"cresc:decline:{appt_id}")],
     ])
 
 def admin_visit_confirm_kb(appt_id: int) -> InlineKeyboardMarkup:
