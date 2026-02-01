@@ -37,7 +37,7 @@ def load_config() -> Config:
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     admin_tg_id = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
     database_url = os.getenv("DATABASE_URL", "").strip()
-    timezone = os.getenv("TIMEZONE", "Europe/Amsterdam").strip()
+    timezone = os.getenv("TIMEZONE", "Europe/Moscow").strip()
 
     mode = os.getenv("MODE", "polling").strip().lower()
     webhook_url = os.getenv("WEBHOOK_URL", "").strip() or None
