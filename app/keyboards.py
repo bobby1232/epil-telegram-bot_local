@@ -22,6 +22,7 @@ def _format_date_ru(d: date) -> str:
 
 def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     kb = [
+        ["Пассажир", "Водитель"],
         ["Записаться", "Цены и услуги"],
         ["Адрес / Контакты", "Мои записи"],
         ["История"],
