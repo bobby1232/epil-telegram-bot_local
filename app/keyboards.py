@@ -168,6 +168,12 @@ def admin_request_kb(appt_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Написать клиенту", callback_data=f"adm:msg:{appt_id}")],
     ])
 
+def client_confirmed_kb(appt_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 Отменить", callback_data=f"mycancel:{appt_id}")],
+        [InlineKeyboardButton("💬 Написать водителю", callback_data=f"clientmsg:{appt_id}")],
+    ])
+
 def admin_manage_appt_kb(appt_id: int, *, allow_reschedule: bool = True) -> InlineKeyboardMarkup:
     rows = []
     if allow_reschedule:
