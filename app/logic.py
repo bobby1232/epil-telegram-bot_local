@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import select, text, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import User, Service, Setting, Appointment, AppointmentStatus, BlockedInterval, BreakRule
+from app.models import User, Service, Setting, Appointment, AppointmentStatus, BlockedInterval
 
 @dataclass(frozen=True)
 class SettingsView:
@@ -330,46 +330,6 @@ async def create_hold_appointment(
     await session.flush()
     return appt
 
-async def create_hold_appointment_with_duration(
-    session: AsyncSession,
-    settings: SettingsView,
-    client: User,
-    service: Service,
-    start_local: datetime,
-    *,
-    duration_min: int,
-    comment: str | None,
-    price_override: float | None = None,
-    admin_comment: str | None = None,
-) -> Appointment:
-    now_utc = datetime.now(tz=pytz.UTC)
-    start_utc = _to_utc(start_local, settings.tz)
-    end_local = compute_slot_end_for_duration(start_local, duration_min, service, settings)
-    end_utc = _to_utc(end_local, settings.tz)
-
-    await _ensure_slot_available(session, start_utc, end_utc, service.id)
-
-    appt = Appointment(
-        client_user_id=client.id,
-        service_id=service.id,
-        start_dt=start_utc,
-        end_dt=end_utc,
-        status=AppointmentStatus.Hold,
-        hold_expires_at=now_utc + timedelta(minutes=settings.hold_ttl_min),
-        client_comment=comment,
-        admin_comment=admin_comment,
-        price_override=price_override,
-        proposed_alt_start_dt=None,
-        reminder_24h_sent=False,
-        reminder_2h_sent=False,
-        visit_confirmed=False,
-        created_at=now_utc,
-        updated_at=now_utc,
-    )
-    session.add(appt)
-    await session.flush()
-    return appt
-
 async def create_admin_appointment(
     session: AsyncSession,
     settings: SettingsView,
@@ -519,99 +479,6 @@ async def create_blocked_interval(
     session.add(block)
     return block
 
-def _candidate_break_start(rule: BreakRule, day: date, tz: pytz.BaseTzInfo) -> datetime:
-    return tz.localize(datetime.combine(day, rule.start_time))
-
-def _break_rule_due_dates(rule: BreakRule, *, through_day: date, work_days: set[int]) -> list[date]:
-    if rule.repeat == "daily":
-        step = timedelta(days=1)
-    elif rule.repeat == "weekly":
-        step = timedelta(days=7)
-    else:
-        return []
-
-    cursor = rule.start_date
-    if rule.last_generated_date and rule.last_generated_date > cursor:
-        cursor = rule.last_generated_date + step
-
-    dates: list[date] = []
-    while cursor <= through_day:
-        if cursor.weekday() in work_days:
-            dates.append(cursor)
-        cursor += step
-    return dates
-
-async def list_active_break_rules(session: AsyncSession) -> list[BreakRule]:
-    return (await session.execute(
-        select(BreakRule).order_by(BreakRule.id.asc())
-    )).scalars().all()
-
-async def create_break_rule(
-    session: AsyncSession,
-    *,
-    repeat: str,
-    start_local: datetime,
-    duration_min: int,
-    reason: str,
-    created_by_admin: int,
-    last_generated_date: date | None = None,
-) -> BreakRule:
-    now_utc = datetime.now(tz=pytz.UTC)
-    rule = BreakRule(
-        repeat=repeat,
-        start_time=start_local.timetz().replace(tzinfo=None),
-        duration_min=duration_min,
-        reason=reason,
-        weekday=start_local.weekday(),
-        start_date=start_local.date(),
-        last_generated_date=last_generated_date,
-        created_at=now_utc,
-        created_by_admin=created_by_admin,
-    )
-    session.add(rule)
-    return rule
-
-async def generate_breaks_from_rules(
-    session: AsyncSession,
-    settings: SettingsView,
-    *,
-    horizon_days: int,
-) -> tuple[int, int]:
-    now_local = _to_tz(datetime.now(tz=pytz.UTC), settings.tz)
-    through_day = (now_local + timedelta(days=horizon_days)).date()
-    rules = await list_active_break_rules(session)
-    created = 0
-    skipped = 0
-    for rule in rules:
-        if rule.repeat not in {"daily", "weekly"}:
-            continue
-        if rule.repeat == "weekly" and rule.weekday is not None:
-            work_days = settings.work_days | {rule.weekday}
-        else:
-            work_days = settings.work_days
-        candidate_days = _break_rule_due_dates(rule, through_day=through_day, work_days=work_days)
-        for day in candidate_days:
-            start_local = _candidate_break_start(rule, day, settings.tz)
-            try:
-                await create_blocked_interval(
-                    session,
-                    settings,
-                    start_local,
-                    rule.duration_min,
-                    created_by_admin=rule.created_by_admin,
-                    reason=rule.reason or "Перерыв",
-                )
-                created += 1
-            except ValueError as e:
-                code = str(e)
-                if code in {"SLOT_TAKEN", "SLOT_BLOCKED"}:
-                    skipped += 1
-                    continue
-                raise
-        if candidate_days:
-            rule.last_generated_date = candidate_days[-1]
-    return created, skipped
-
 async def request_reschedule(
     session: AsyncSession,
     settings: SettingsView,
@@ -622,8 +489,8 @@ async def request_reschedule(
         raise ValueError("NOT_BOOKED")
     now_utc = datetime.now(tz=pytz.UTC)
     start_utc = _to_utc(new_start_local, settings.tz)
-    duration_delta = appt.end_dt - appt.start_dt
-    end_utc = start_utc + duration_delta
+    end_local = compute_slot_end(new_start_local, appt.service, settings)
+    end_utc = _to_utc(end_local, settings.tz)
 
     lock_key = _advisory_key_for_slot(start_utc, appt.service_id)
     await session.execute(text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=lock_key))
@@ -660,8 +527,9 @@ async def confirm_reschedule(session: AsyncSession, settings: SettingsView, appt
         return
     now_utc = datetime.now(tz=pytz.UTC)
     start_utc = appt.proposed_alt_start_dt
-    duration_delta = appt.end_dt - appt.start_dt
-    end_utc = start_utc + duration_delta
+    start_local = _to_tz(start_utc, settings.tz)
+    end_local = compute_slot_end(start_local, appt.service, settings)
+    end_utc = _to_utc(end_local, settings.tz)
 
     lock_key = _advisory_key_for_slot(start_utc, appt.service_id)
     await session.execute(text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=lock_key))
@@ -856,24 +724,6 @@ async def admin_list_booked_range(
                 Appointment.start_dt >= start_utc,
                 Appointment.start_dt < end_utc,
                 Appointment.status == AppointmentStatus.Booked,
-            )
-        )
-        .order_by(Appointment.start_dt.asc())
-    )).scalars().all()
-
-async def admin_list_appointments_range(
-    session: AsyncSession,
-    start_utc: datetime,
-    end_utc: datetime,
-) -> list[Appointment]:
-    return (await session.execute(
-        select(Appointment)
-        .options(selectinload(Appointment.client), selectinload(Appointment.service))
-        .where(
-            and_(
-                Appointment.start_dt >= start_utc,
-                Appointment.start_dt < end_utc,
-                Appointment.status.in_([AppointmentStatus.Booked, AppointmentStatus.Hold]),
             )
         )
         .order_by(Appointment.start_dt.asc())

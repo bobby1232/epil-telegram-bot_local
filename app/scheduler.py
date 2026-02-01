@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Appointment, AppointmentStatus
-from app.utils import appointment_services_label
 
 
 async def tick(application):
@@ -48,7 +47,7 @@ async def tick(application):
             appt.updated_at = now_utc
 
             chat_id = appt.client.tg_id
-            service_name = appointment_services_label(appt)
+            service_name = appt.service.name if appt.service else "—"
             dt_txt = appt.start_dt.astimezone(pytz.UTC).strftime("%d.%m %H:%M")
 
             notifications.append(

@@ -11,7 +11,6 @@ class Config:
 
     webhook_url: str | None
     port: int
-    schedule_visualization: int
 
     # Seed defaults (only used on first DB init)
     slot_step_min: int
@@ -53,7 +52,6 @@ def load_config() -> Config:
 
     webhook_url = os.getenv("WEBHOOK_URL", "").strip() or None
     port = _get_int("PORT", 8080)
-    schedule_visualization = _get_int("SCHEDULE_VISUALIZATION", 1)
 
     return Config(
         bot_token=bot_token,
@@ -64,7 +62,6 @@ def load_config() -> Config:
 
         webhook_url=webhook_url,
         port=port,
-        schedule_visualization=schedule_visualization,
 
         slot_step_min=_get_int("SLOT_STEP_MIN", 30),
         buffer_min=_get_int("BUFFER_MIN", 10),
@@ -74,5 +71,5 @@ def load_config() -> Config:
         cancel_limit_hours=_get_int("CANCEL_LIMIT_HOURS", 2),
         work_start=os.getenv("WORK_START", "09:00").strip(),
         work_end=os.getenv("WORK_END", "20:45").strip(),
-        work_days=os.getenv("WORK_DAYS", "0,1,2,3,4,5,6").strip(),  # 0=Mon
+        work_days=os.getenv("WORK_DAYS", "0,1,2,3,4,5").strip(),  # 0=Mon
     )

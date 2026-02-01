@@ -9,8 +9,8 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Appointment, AppointmentStatus, User, Service
 from app.logic import get_settings
-from app.keyboards import reminder_kb, admin_visit_confirm_kb
-from app.utils import format_price, appointment_services_label
+from app.keyboards import reminder_kb
+from app.utils import format_price
 from texts import AFTERCARE_RECOMMENDATIONS_PARTS
 
 
@@ -30,7 +30,7 @@ REMINDER_48H_TEMPLATE = (
     "Будем рады видеть вас 💛"
 )
 
-REMINDER_2H_TEMPLATE = (
+REMINDER_3H_TEMPLATE = (
     "⏰ Скоро встречаемся!\n\n"
     "Ваша запись сегодня:\n"
     "**{service}**\n"
@@ -65,17 +65,6 @@ def _localize(dt: datetime, tz) -> datetime:
 def _format_hours(total_hours: float) -> str:
     formatted = f"{total_hours:.2f}".rstrip("0").rstrip(".")
     return formatted or "0"
-
-def _admin_ids(cfg) -> tuple[int, ...]:
-    if cfg is None:
-        return tuple()
-    ids = getattr(cfg, "admin_telegram_ids", None)
-    if ids:
-        return tuple(ids)
-    admin_id = getattr(cfg, "admin_telegram_id", None)
-    if admin_id:
-        return (int(admin_id),)
-    return tuple()
 
 
 async def _send_earnings_report(
@@ -137,7 +126,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     Запускается JobQueue раз в минуту.
     Шлём:
       - за 48 часов (флаг reminder_24h_sent используем как "первое напоминание")
-      - за 2 часа   (флаг reminder_2h_sent используем как "второе напоминание")
+      - за 3 часа   (флаг reminder_2h_sent используем как "второе напоминание")
     Только для AppointmentStatus.Booked.
     """
     app = context.application
@@ -145,21 +134,20 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     if session_factory is None:
         # если у тебя session_factory хранится иначе — скажи, поменяю
         return
-    cfg = app.bot_data.get("cfg")
 
     tz_name = app.bot_data.get("tz", "Europe/Moscow")
     now = _utcnow()
 
     # Окна под отправку (чтобы не ловить погрешности по минутам)
     # 48 часов: попадаем в окно [48h, 48h+2min)
-    # 2 часа:   попадаем в окно [2h, 2h+2min)
+    # 3 часа:   попадаем в окно [3h, 3h+2min)
     win = timedelta(minutes=2)
 
     target_48_from = now + timedelta(hours=48)
     target_48_to = target_48_from + win
 
-    target_2_from = now + timedelta(hours=2)
-    target_2_to = target_2_from + win
+    target_3_from = now + timedelta(hours=3)
+    target_3_to = target_3_from + win
 
     async with session_factory() as session:
         settings = await get_settings(session, tz_name)
@@ -182,7 +170,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             d, t = _fmt_date(appt.start_dt, tz_name)
             allow_reschedule = now <= (appt.start_dt - timedelta(hours=settings.cancel_limit_hours))
             text = REMINDER_48H_TEMPLATE.format(
-                service=appointment_services_label(appt),
+                service=(appt.service.name if appt.service else "Услуга"),
                 date=d,
                 time=t,
             )
@@ -204,26 +192,26 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # не валим весь джоб из-за 1 ошибки
                 continue
 
-        # --- 2h reminders ---
-        q2 = (
+        # --- 3h reminders ---
+        q3 = (
             select(Appointment)
             .options(selectinload(Appointment.client), selectinload(Appointment.service))
             .where(Appointment.status == AppointmentStatus.Booked)
-            .where(Appointment.reminder_2h_sent.is_(False))   # используем как "2h не отправляли"
-            .where(Appointment.start_dt >= target_2_from)
-            .where(Appointment.start_dt < target_2_to)
+            .where(Appointment.reminder_2h_sent.is_(False))   # используем как "3h не отправляли"
+            .where(Appointment.start_dt >= target_3_from)
+            .where(Appointment.start_dt < target_3_to)
         )
-        res2 = await session.execute(q2)
-        appts2 = list(res2.scalars().all())
+        res3 = await session.execute(q3)
+        appts3 = list(res3.scalars().all())
 
-        for appt in appts2:
+        for appt in appts3:
             if not appt.client or not appt.client.tg_id:
                 continue
 
             d, t = _fmt_date(appt.start_dt, tz_name)
             allow_reschedule = now <= (appt.start_dt - timedelta(hours=settings.cancel_limit_hours))
-            text = REMINDER_2H_TEMPLATE.format(
-                service=appointment_services_label(appt),
+            text = REMINDER_3H_TEMPLATE.format(
+                service=(appt.service.name if appt.service else "Услуга"),
                 time=t,
             )
 
@@ -256,49 +244,22 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         appts_aftercare = list(res_aftercare.scalars().all())
 
         for appt in appts_aftercare:
-            admin_ids = _admin_ids(cfg)
-            if admin_ids:
-                date_label, time_label = _fmt_date(appt.start_dt, tz_name)
-                price_label = format_price(
-                    appt.price_override if appt.price_override is not None else appt.service.price
-                )
-                client_label = appt.client.full_name or (
-                    f"@{appt.client.username}" if appt.client.username else str(appt.client.tg_id)
-                )
-                service_label = appointment_services_label(appt)
-                text = (
-                    "✅ Визит завершён.\n"
-                    "Подтверди финальную стоимость для учёта:\n"
-                    f"{date_label} {time_label}\n"
-                    f"Услуга: {service_label}\n"
-                    f"Клиент: {client_label}\n"
-                    f"Цена: {price_label}"
-                )
-                for admin_id in admin_ids:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=admin_id,
-                            text=text,
-                            reply_markup=admin_visit_confirm_kb(appt.id),
-                        )
-                    except Exception:
-                        continue
+            if not appt.client or not appt.client.tg_id:
+                continue
 
-            if appt.client and appt.client.tg_id:
-                try:
-                    for part in AFTERCARE_RECOMMENDATIONS_PARTS:
-                        await context.bot.send_message(
-                            chat_id=appt.client.tg_id,
-                            text=part,
-                        )
-                except Exception:
-                    pass
-
-            await session.execute(
-                update(Appointment)
-                .where(Appointment.id == appt.id)
-                .values(status=AppointmentStatus.Completed, updated_at=_utcnow())
-            )
+            try:
+                for part in AFTERCARE_RECOMMENDATIONS_PARTS:
+                    await context.bot.send_message(
+                        chat_id=appt.client.tg_id,
+                        text=part,
+                    )
+                await session.execute(
+                    update(Appointment)
+                    .where(Appointment.id == appt.id)
+                    .values(status=AppointmentStatus.Completed, updated_at=_utcnow())
+                )
+            except Exception:
+                continue
 
         await session.commit()
 
@@ -362,9 +323,8 @@ async def send_daily_admin_schedule(context: ContextTypes.DEFAULT_TYPE) -> None:
             price = format_price(
                 appt.price_override if appt.price_override is not None else appt.service.price
             )
-            service_label = appointment_services_label(appt)
             lines.append(
-                f"• {start_t}–{end_t} | {service_label} | {price} | {client} | {phone}"
+                f"• {start_t}–{end_t} | {appt.service.name} | {price} | {client} | {phone}"
             )
         text = "\n".join(lines)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from app.models import Service, Appointment
-from app.utils import format_price, appointment_services_label
+from app.utils import format_price
 
 STATUS_RU = {
     "Hold": "Ожидает подтверждения",
@@ -22,10 +22,10 @@ def _format_date_ru(d: date) -> str:
 
 def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     kb = [
-        ["Пассажир", "Водитель"],
         ["Записаться", "Цены и услуги"],
         ["Адрес / Контакты", "Мои записи"],
         ["История"],
+        ["Подготовка к процедуре", "Уход после процедуры"],
         ["Задать вопрос"],
     ]
     if is_admin:
@@ -34,7 +34,7 @@ def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
 
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     kb = [
-        ["📅 Записи сегодня", "📅 Записи завтра", "📆 Записи неделя"],
+        ["📅 Записи сегодня", "📅 Записи завтра"],
         ["🧾 Все заявки (Ожидание)", "🗓 Все заявки"],
         ["📝 Записать клиента"],
         ["⏸ Перерыв", "🗑 Отменить перерыв"],
@@ -57,25 +57,6 @@ def services_kb(services: list[Service]) -> InlineKeyboardMarkup:
     for s in services:
         price = format_price(s.price)
         rows.append([InlineKeyboardButton(f"{s.name} • {int(s.duration_min)} мин • {price}", callback_data=f"svc:{s.id}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
-    return InlineKeyboardMarkup(rows)
-
-def services_multi_kb(services: list[Service], selected_ids: set[int]) -> InlineKeyboardMarkup:
-    rows = []
-    for s in services:
-        price = format_price(s.price)
-        marker = "✅ " if s.id in selected_ids else ""
-        rows.append([
-            InlineKeyboardButton(
-                f"{marker}{s.name} • {int(s.duration_min)} мин • {price}",
-                callback_data=f"svcsel:{s.id}",
-            )
-        ])
-    action_row = [
-        InlineKeyboardButton("➡️ Далее", callback_data="svcnext"),
-        InlineKeyboardButton("🧹 Сбросить", callback_data="svcclear"),
-    ]
-    rows.append(action_row)
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
 
@@ -134,15 +115,6 @@ def break_slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="breakback:dates")])
     return InlineKeyboardMarkup(rows)
 
-def break_repeat_kb() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("Без повторов", callback_data="breakrepeat:none")],
-        [InlineKeyboardButton("Каждый день", callback_data="breakrepeat:daily")],
-        [InlineKeyboardButton("Каждую неделю", callback_data="breakrepeat:weekly")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="breakback:dates")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
 def slots_kb(slots_local: list[datetime]) -> InlineKeyboardMarkup:
     rows = []
     row = []
@@ -169,16 +141,10 @@ def admin_request_kb(appt_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Написать клиенту", callback_data=f"adm:msg:{appt_id}")],
     ])
 
-def client_confirmed_kb(appt_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚫 Отменить", callback_data=f"mycancel:{appt_id}")],
-        [InlineKeyboardButton("💬 Написать водителю", callback_data=f"clientmsg:{appt_id}")],
-    ])
-
 def admin_manage_appt_kb(appt_id: int, *, allow_reschedule: bool = True) -> InlineKeyboardMarkup:
     rows = []
     if allow_reschedule:
-        rows.append([InlineKeyboardButton("🔄 Перенести (согласовать)", callback_data=f"admresched:start:{appt_id}")])
+        rows.append([InlineKeyboardButton("🔄 Перенести", callback_data=f"admresched:start:{appt_id}")])
     rows.append([InlineKeyboardButton("🚫 Отменить", callback_data=f"adm:cancel:{appt_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -187,10 +153,9 @@ def my_appts_kb(appts: list[Appointment], tz=None) -> InlineKeyboardMarkup:
     for a in appts:
         dt = a.start_dt.astimezone(tz) if tz else a.start_dt.astimezone()
         price = format_price(a.price_override if a.price_override is not None else a.service.price)
-        service_label = appointment_services_label(a)
         rows.append([
             InlineKeyboardButton(
-                f"{dt.strftime('%d.%m %H:%M')} • {service_label} • {price} • {status_ru(a.status.value)}",
+                f"{dt.strftime('%d.%m %H:%M')} • {a.service.name} • {price} • {status_ru(a.status.value)}",
                 callback_data=f"my:{a.id}",
             )
         ])
@@ -262,18 +227,6 @@ def admin_reschedule_confirm_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data="admresched:back:dates")],
     ])
 
-def client_reschedule_request_kb(appt_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Согласиться", callback_data=f"cresc:accept:{appt_id}")],
-        [InlineKeyboardButton("❌ Не подходит", callback_data=f"cresc:decline:{appt_id}")],
-    ])
-
-def admin_visit_confirm_kb(appt_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Подтвердить визит", callback_data=f"adm:visit:confirm:{appt_id}")],
-        [InlineKeyboardButton("✏️ Скорректировать цену", callback_data=f"adm:visit:price:{appt_id}")],
-    ])
-
 def reminder_kb(appt_id: int, *, allow_reschedule: bool = False) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("✅ Подтвердить визит", callback_data=f"r:confirm:{appt_id}")]]
     if allow_reschedule:
@@ -287,10 +240,7 @@ def contacts_kb(*, yandex_maps_url: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 Скопировать адрес", callback_data="contact:copy")],
     ])
 
-def cancel_breaks_kb(
-    blocks: list[tuple[int, datetime, datetime]],
-    selected_ids: set[int],
-) -> InlineKeyboardMarkup:
+def cancel_breaks_kb(blocks: list[tuple[int, datetime, datetime]]) -> InlineKeyboardMarkup:
     rows = []
     for block_id, start_local, end_local in blocks:
         weekday = RU_WEEKDAYS[start_local.weekday()]
@@ -302,16 +252,6 @@ def cancel_breaks_kb(
                 f"{start_local.strftime('%H:%M')}–{end_local.strftime('%d.%m %H:%M')}"
             )
         label = f"{date_label} {time_label}"
-        marker = "✅ " if block_id in selected_ids else ""
-        rows.append([
-            InlineKeyboardButton(
-                f"{marker}{label}",
-                callback_data=f"breakcsel:{block_id}",
-            )
-        ])
-    rows.append([
-        InlineKeyboardButton("🗑 Удалить выбранные", callback_data="breakcconfirm"),
-        InlineKeyboardButton("🧹 Сбросить", callback_data="breakcclear"),
-    ])
+        rows.append([InlineKeyboardButton(f"🗑 Отменить {label}", callback_data=f"breakcancel:{block_id}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(rows)
