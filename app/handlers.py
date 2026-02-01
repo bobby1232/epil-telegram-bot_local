@@ -23,7 +23,7 @@ from app.logic import (
     create_admin_appointment_with_duration, check_slot_available,
     check_slot_available_for_duration, compute_slot_end, compute_slot_end_for_duration,
     admin_cancel_appointment, list_available_break_slots, create_blocked_interval,
-    admin_reschedule_appointment, admin_list_appointments_range,
+    admin_list_appointments_range,
     list_future_breaks, delete_blocked_interval, SettingsView,
     create_break_rule, generate_breaks_from_rules
 )
@@ -34,7 +34,7 @@ from app.keyboards import (
     admin_services_kb, admin_dates_kb, admin_slots_kb, admin_manage_appt_kb,
     admin_reschedule_dates_kb, admin_reschedule_slots_kb, admin_reschedule_confirm_kb,
     break_dates_kb, break_slots_kb, break_repeat_kb, status_ru, RU_WEEKDAYS, cancel_breaks_kb,
-    contacts_kb, admin_visit_confirm_kb,
+    contacts_kb, admin_visit_confirm_kb, client_reschedule_request_kb,
 )
 from app.models import AppointmentStatus, BlockedInterval
 from app.schedule_style import DAY_TIMELINE_STYLE, WEEK_SCHEDULE_STYLE
@@ -703,6 +703,14 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("adm:resched:reject:"):
         appt_id = int(data.split(":")[3])
         return await admin_reschedule_reject(update, context, appt_id)
+
+    if data.startswith("cresc:accept:"):
+        appt_id = int(data.split(":")[2])
+        return await client_accept_admin_reschedule(update, context, appt_id)
+
+    if data.startswith("cresc:decline:"):
+        appt_id = int(data.split(":")[2])
+        return await client_decline_admin_reschedule(update, context, appt_id)
 
     if data == "contact:copy":
         return await send_address_copy(update, context)
@@ -2163,7 +2171,7 @@ async def admin_finalize_reschedule(update: Update, context: ContextTypes.DEFAUL
             if new_start < now_local:
                 return await update.callback_query.message.edit_text("Нельзя перенести запись на время в прошлом.")
             try:
-                await admin_reschedule_appointment(s, settings, appt, new_start)
+                await request_reschedule(s, settings, appt, new_start)
             except ValueError as e:
                 code = str(e)
                 if code == "SLOT_TAKEN":
@@ -2172,22 +2180,26 @@ async def admin_finalize_reschedule(update: Update, context: ContextTypes.DEFAUL
                     return await update.callback_query.message.edit_text("Слот заблокирован. Выбери другое время.")
                 return await update.callback_query.message.edit_text("Не удалось перенести запись.")
 
-            new_local = appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')
+            new_local = appt.proposed_alt_start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')
+            old_local = appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')
             if appt.client.tg_id > 0:
                 try:
                     await context.bot.send_message(
                         chat_id=appt.client.tg_id,
                         text=(
-                            "🔄 Мастер перенёс вашу запись.\n"
-                            f"Новая дата/время: {new_local}\n"
-                            f"Услуга: {appointment_services_label(appt)}"
-                        )
+                            "🔄 Мастер предлагает перенести запись.\n"
+                            f"Текущее время: {old_local}\n"
+                            f"Новое время: {new_local}\n"
+                            f"Услуга: {appointment_services_label(appt)}\n"
+                            "Подтвердите перенос или откажитесь."
+                        ),
+                        reply_markup=client_reschedule_request_kb(appt.id),
                     )
                 except Exception:
                     pass
 
     _clear_admin_reschedule(context)
-    await update.callback_query.message.edit_text("Запись перенесена ✅")
+    await update.callback_query.message.edit_text("Запрос на перенос отправлен клиенту ✅")
 
 async def admin_reschedule_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
     cfg: Config = context.bot_data["cfg"]
@@ -2242,6 +2254,78 @@ async def admin_reschedule_reject(update: Update, context: ContextTypes.DEFAULT_
                 )
             )
     await update.callback_query.message.edit_text("Перенос отклонён ❌")
+
+async def client_accept_admin_reschedule(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
+    session_factory = context.bot_data["session_factory"]
+    cfg: Config = context.bot_data["cfg"]
+    user_id = update.effective_user.id if update.effective_user else None
+
+    async with session_factory() as s:
+        async with s.begin():
+            settings = await get_settings(s, cfg.timezone)
+            appt = await get_appointment(s, appt_id)
+            if user_id != appt.client.tg_id:
+                return await update.callback_query.message.edit_text("Нет доступа.")
+            if not appt.proposed_alt_start_dt:
+                return await update.callback_query.message.edit_text("Запрос на перенос не найден.")
+            try:
+                await confirm_reschedule(s, settings, appt)
+            except ValueError as e:
+                code = str(e)
+                if code == "SLOT_TAKEN":
+                    return await update.callback_query.message.edit_text(
+                        "Слот уже занят. Перенос не подтверждён."
+                    )
+                if code == "SLOT_BLOCKED":
+                    return await update.callback_query.message.edit_text(
+                        "Слот заблокирован. Перенос не подтверждён."
+                    )
+                return await update.callback_query.message.edit_text("Не удалось подтвердить перенос.")
+
+            new_local = appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')
+            await notify_admins(
+                context,
+                cfg,
+                text=(
+                    "✅ Клиент подтвердил перенос.\n"
+                    f"Новая дата/время: {new_local}\n"
+                    f"Услуга: {appointment_services_label(appt)}\n"
+                    f"Клиент: {appt.client.full_name or appt.client.username or appt.client.tg_id}"
+                ),
+            )
+    await update.callback_query.message.edit_text("Перенос подтверждён ✅")
+
+async def client_decline_admin_reschedule(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
+    session_factory = context.bot_data["session_factory"]
+    cfg: Config = context.bot_data["cfg"]
+    user_id = update.effective_user.id if update.effective_user else None
+
+    async with session_factory() as s:
+        async with s.begin():
+            settings = await get_settings(s, cfg.timezone)
+            appt = await get_appointment(s, appt_id)
+            if user_id != appt.client.tg_id:
+                return await update.callback_query.message.edit_text("Нет доступа.")
+            if not appt.proposed_alt_start_dt:
+                return await update.callback_query.message.edit_text("Запрос на перенос не найден.")
+            old_local = appt.start_dt.astimezone(settings.tz).strftime('%d.%m %H:%M')
+            appt.status = AppointmentStatus.Canceled
+            appt.proposed_alt_start_dt = None
+            appt.updated_at = datetime.now(tz=pytz.UTC)
+
+            await notify_admins(
+                context,
+                cfg,
+                text=(
+                    "❌ Клиент отказался от переноса. Запись отменена.\n"
+                    f"Изначальная дата/время: {old_local}\n"
+                    f"Услуга: {appointment_services_label(appt)}\n"
+                    f"Клиент: {appt.client.full_name or appt.client.username or appt.client.tg_id}"
+                ),
+            )
+    await update.callback_query.message.edit_text(
+        "Перенос отклонён. Запись отменена, место освобождено ✅"
+    )
 
 async def admin_action_msg(update: Update, context: ContextTypes.DEFAULT_TYPE, appt_id: int):
     cfg: Config = context.bot_data["cfg"]
